@@ -31,47 +31,38 @@ outColor = vec4(normalize(normal) * 0.5 + 0.5, 1);
 // https://www.shadertoy.com/view/XdXGW8
 
 const FBM = `
-vec2 grad(ivec2 z)  // replace this anything that returns a random vector
+vec2 grad(ivec2 z)
 {
-    // 2D to 1D (feel free to replace by some other)
-    int n = z.x + z.y * 11111;
-
-    // Hugo Elias hash (feel free to replace by another one)
-    n = (n << 13) ^ n;
-    n = (n * (n * n * 15731 + 789221) + 1376312589) >> 16;
-
-    // simple random vectors
-    return vec2(cos(float(n)), sin(float(n)));
+int n = z.x + z.y * 11111;
+n = (n << 13) ^ n;
+n = (n * (n * n * 15731 + 789221) + 1376312589) >> 16;
+return vec2(cos(float(n)), sin(float(n)));
 }
 
 float noise(vec2 p)
 {
-    ivec2 i = ivec2(floor(p));
-    vec2 f = fract(p);
-
-    vec2 u = f * f * (3.0 - 2.0 * f); // feel free to replace by a quintic smoothstep instead
-    ivec2 oi = ivec2(0, 1);
-    vec2 of = vec2(oi);
-
-    return mix(mix(dot(grad(i + oi.xx), f - of.xx),
-                   dot(grad(i + oi.yx), f - of.yx), u.x),
-               mix(dot(grad(i + oi.xy), f - of.xy),
-                   dot(grad(i + oi.yy), f - of.yy), u.x), u.y)
-        * 0.5 + 0.5;
+ivec2 i = ivec2(floor(p));
+vec2 f = fract(p);
+vec2 u = f * f * (3.0 - 2.0 * f);
+ivec2 oi = ivec2(0, 1);
+vec2 of = vec2(oi);
+return mix(mix(dot(grad(i + oi.xx), f - of.xx),
+dot(grad(i + oi.yx), f - of.yx), u.x),
+mix(dot(grad(i + oi.xy), f - of.xy),
+dot(grad(i + oi.yy), f - of.yy), u.x), u.y)
+* 0.5 + 0.5;
 }
-
 float fbm(vec2 p, int numOctaves, float scale, float lacunarity)
 {
-    float t = 0.0;
-    float z = 1.0;
-    for (int i = 0; i < numOctaves; ++i)
-    {
-        z *= 0.5;
-        t += z * noise(p * scale);
-        p = p * lacunarity;
-    }
-
-    return t / (1.0 - z);
+float t = 0.0;
+float z = 1.0;
+for (int i = 0; i < numOctaves; ++i)
+{
+z *= 0.5;
+t += z * noise(p * scale);
+p = p * lacunarity;
+}
+return t / (1.0 - z);
 }
 `;
 
@@ -88,29 +79,22 @@ interface TextureCollection
 const VoronoiGrayscale = `
 vec2 voronoi(vec2 x, float w)
 {
-    vec2 n = floor(x);
-    vec2 f = fract(x);
+vec2 n = floor(x);
+vec2 f = fract(x);
+vec2 m = vec2(0.0, 8.0);
+for (int j = -2; j <= 2; ++j)
+for (int i = -2; i <= 2; ++i)
+{
+vec2 g = vec2(i, j);
+vec2 o = hash2(n + g);
+float d = length(g - f + o);
+float col = 0.5 + 0.5 * sin(hash1(dot(n + g, vec2(7.0, 113.0))) * 2.5 + 5.0);
+float h = smoothstep(0.0, 1.0, 0.5 + 0.5 * (m.y - d) / w);
+m.y = mix(m.y, d, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // distance
+m.x = mix(m.x, col, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // color
+}
 
-    vec2 m = vec2(0.0, 8.0);
-    for (int j = -2; j <= 2; ++j)
-    for (int i = -2; i <= 2; ++i)
-    {
-        vec2 g = vec2(i, j);
-        vec2 o = hash2(n + g);
-
-        // distance to cell
-        float d = length(g - f + o);
-
-        // cell color
-        float col = 0.5 + 0.5 * sin(hash1(dot(n + g, vec2(7.0, 113.0))) * 2.5 + 5.0);
-
-        // do the smooth min for colors and distances
-        float h = smoothstep(0.0, 1.0, 0.5 + 0.5 * (m.y - d) / w);
-        m.y = mix(m.y, d, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // distance
-        m.x = mix(m.x, col, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // color
-    }
-
-    return m;
+return m;
 }
 `;
 
@@ -118,60 +102,51 @@ vec2 voronoi(vec2 x, float w)
 const ShaderUtils = `
 float hash1(float n)
 {
-    return fract(sin(n) * 43758.5453);
+return fract(sin(n) * 43758.5453);
 }
-
 vec2 hash2(vec2 p)
 {
-    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return fract(sin(p)*43758.5453);
+p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+return fract(sin(p)*43758.5453);
 }
-
 float saturate(float x)
 {
-    return clamp(x, 0.0, 1.0);
+return clamp(x, 0.0, 1.0);
 }
-
 float unlerp(float a, float b, float x)
 {
-    return (x - a) / (b - a);
+return (x - a) / (b - a);
 }
-
 float remap(float from0, float from1, float to0, float to1, float x)
 {
-    return mix(to0, to1, unlerp(from0, from1, x));
+return mix(to0, to1, unlerp(from0, from1, x));
 }
-
 float sharpstep(float edge0, float edge1, float x)
 {
-    return saturate(unlerp(edge0, edge1, x));
+return saturate(unlerp(edge0, edge1, x));
 }
-
 vec4 colorRamp2(vec4 colorA, float posA, vec4 colorB, float posB, float t)
 {
-    return mix(colorA, colorB, sharpstep(posA, posB, t));
+return mix(colorA, colorB, sharpstep(posA, posB, t));
 }
-
 float valueRamp2(float colorA, float posA, float colorB, float posB, float t)
 {
-    return mix(colorA, colorB, sharpstep(posA, posB, t));
+return mix(colorA, colorB, sharpstep(posA, posB, t));
 }
-
 `;
 
 const edgeBlend = (fnName: string, blend = 0.2) => `
 vec4 edgeBlend(vec2 uv)
 {
-    const vec2 fadeWidth = vec2(${blend});
-    const vec2 scaling = 1.0 - fadeWidth;
-    vec2 offsetuv = uv * scaling;
-    vec2 blend = clamp((uv - scaling) / fadeWidth, 0.0, 1.0);
-
-    return
-        blend.y * blend.x * ${fnName}(fract(offsetuv + (fadeWidth * 2.0))) +
-        blend.y * (1.0 - blend.x) * ${fnName}(vec2(fract(offsetuv.x + fadeWidth.x), fract(offsetuv.y + (fadeWidth.y * 2.0)))) +
-        (1.0 - blend.y) * (1.0 - blend.x) * ${fnName}(fract(offsetuv + fadeWidth)) +
-        (1.0 - blend.y) * blend.x * ${fnName}(vec2(fract(offsetuv.x + (fadeWidth.x * 2.0)), fract(offsetuv.y + fadeWidth.y)));
+const vec2 fadeWidth = vec2(${blend});
+const vec2 scaling = 1.0 - fadeWidth;
+vec2 offsetuv = uv * scaling;
+vec2 blend = clamp((uv - scaling) / fadeWidth, 0.0, 1.0);
+return
+blend.y * blend.x * ${fnName}(fract(offsetuv + (fadeWidth * 2.0))) +
+blend.y * (1.0 - blend.x) * ${fnName}(vec2(fract(offsetuv.x + fadeWidth.x), fract(offsetuv.y + (fadeWidth.y * 2.0)))) +
+(1.0 - blend.y) * (1.0 - blend.x) * ${fnName}(fract(offsetuv + fadeWidth)) +
+(1.0 - blend.y) * blend.x * ${fnName}(vec2(fract(offsetuv.x + (fadeWidth.x * 2.0)), fract(offsetuv.y + fadeWidth.y)));
 }
 
 `;
@@ -290,11 +265,6 @@ function Clamp(x: number, a: number, b: number)
     return x < a ? a : (x > b ? b : x);
 }
 
-function Fract(x: number)
-{
-    return x - Math.floor(x);
-}
-
 function Smoothstep(edge0: number, edge1: number, x: number)
 {
     const t = Clamp(Unlerp(edge0, edge1, x), 0, 1);
@@ -311,7 +281,10 @@ abstract class VectorBase<Length extends number> extends Float32Array
     }
 
     public abstract get new(): this;
-    public clone = () => this.new.set(this);
+    public clone()
+    {
+        return this.new.set(this);
+    }
 
     public set(array: ArrayLike<number>, offset?: number | undefined)
     {
@@ -319,9 +292,15 @@ abstract class VectorBase<Length extends number> extends Float32Array
         return this;
     }
 
-    public copyFrom = (other: VectorBase<Length>) => this.set(other);
+    public copyFrom(other: VectorBase<Length>)
+    {
+        return this.set(other);
+    }
 
-    public setValues = (...vals: FixedLengthArray<number, Length>) => this.set(vals);
+    public setValues(...vals: FixedLengthArray<number, Length>)
+    {
+        return this.set(vals);
+    }
 
     public setScalar(num: number)
     {
@@ -373,26 +352,6 @@ abstract class VectorBase<Length extends number> extends Float32Array
         return this;
     }
 
-    public addScalar(other: number)
-    {
-        for (let i = 0; i < super.length; ++i)
-        {
-            this[i] += other;
-        }
-
-        return this;
-    }
-
-    public subScalar(other: number)
-    {
-        for (let i = 0; i < super.length; ++i)
-        {
-            this[i] -= other;
-        }
-
-        return this;
-    }
-
     public mulScalar(other: number)
     {
         for (let i = 0; i < super.length; ++i)
@@ -403,17 +362,10 @@ abstract class VectorBase<Length extends number> extends Float32Array
         return this;
     }
 
-    public divScalar(other: number)
+    public dot(other: VectorBase<Length>): number
     {
-        for (let i = 0; i < super.length; ++i)
-        {
-            this[i] /= other;
-        }
-
-        return this;
+        return this.new.copyFrom(this).mul(other).csum;
     }
-
-    public dot = (other: VectorBase<Length>): number => this.new.copyFrom(this).mul(other).csum;
 
     public get lengthSqr()
     {
@@ -424,10 +376,6 @@ abstract class VectorBase<Length extends number> extends Float32Array
     {
         return Math.sqrt(this.lengthSqr);
     }
-
-    public distanceSqr = (other: VectorBase<Length>) => this.new.copyFrom(this).sub(other).lengthSqr;
-
-    public distance = (other: VectorBase<Length>) => this.new.copyFrom(this).sub(other).length;
 
     // component sum
     public get csum()
@@ -441,12 +389,15 @@ abstract class VectorBase<Length extends number> extends Float32Array
         return l;
     }
 
-    public normalize = () => this.divScalar(this.length);
+    public normalize()
+    {
+        return this.mulScalar(1 / this.length);
+    }
 
     public safeNormalize()
     {
         const len = this.length;
-        return len > 1e-9 ? this.divScalar(len) : this.setScalar(0);
+        return len > 1e-9 ? this.mulScalar(1 / len) : this.setScalar(0);
     }
 
     public lerpVectors(a: VectorBase<Length>, b: VectorBase<Length>, t: number)
@@ -459,60 +410,9 @@ abstract class VectorBase<Length extends number> extends Float32Array
         return this;
     }
 
-    public lerp = (other: VectorBase<Length>, t: number) => this.lerpVectors(this, other, t);
-}
-
-class Vector4 extends VectorBase<4>
-{
-    constructor(x = 0, y = 0, z = 0, w = 0)
+    public lerp(other: VectorBase<Length>, t: number)
     {
-        super(4, [x, y, z, w]);
-    }
-
-    // @ts-ignore
-    public get new()
-    {
-        return new Vector4();
-    }
-
-    get x()
-    {
-        return this[0];
-    }
-
-    set x(v)
-    {
-        this[0] = v;
-    }
-
-    get y()
-    {
-        return this[1];
-    }
-
-    set y(v)
-    {
-        this[1] = v;
-    }
-
-    get z()
-    {
-        return this[2];
-    }
-
-    set z(v)
-    {
-        this[2] = v;
-    }
-
-    get w()
-    {
-        return this[3];
-    }
-
-    set w(v)
-    {
-        this[3] = v;
+        return this.lerpVectors(this, other, t);
     }
 }
 
@@ -559,13 +459,15 @@ class Vector3 extends VectorBase<3>
         this[2] = v;
     }
 
-    public crossVectors = (a: this, b: this) => this.setValues(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+    public crossVectors(a: this, b: this)
+    {
+        return this.setValues(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+    }
 
-    public cross = (other: this) => this.crossVectors(this, other);
-
-    public setFromMatrixPosition = (mat: Matrix4x4) => this.set(mat.subarray(12, 15));
-
-    public setFromMatrixColumn = (mat: Matrix4x4, col: number) => this.set(mat.subarray(col * 4, (col + 1) * 4));
+    public cross(other: this)
+    {
+        return this.crossVectors(this, other);
+    }
 
     public applyQuaternion(q: Quaternion)
     {
@@ -621,13 +523,14 @@ class Vector2 extends VectorBase<2>
 }
 
 // https://github.com/mrdoob/three.js/blob/dev/src/math/Quaternion.js
-class Quaternion extends Vector4
+class Quaternion extends VectorBase<4>
 {
     constructor(x = 0, y = 0, z = 0, w = 1)
     {
-        super(x, y, z, w);
+        super(4, [x, y, z, w]);
     }
 
+    // @ts-ignore
     public get new(): Quaternion
     {
         return new Quaternion();
@@ -643,94 +546,8 @@ class Quaternion extends Vector4
 
     public invert()
     {
-        this.w = -this.w;
+        this[3] *= -1;
         return this;
-    }
-
-    public setFromEulerXYZ(x: number, y: number, z: number)
-    {
-        const c1 = Math.cos(x / 2);
-        const c2 = Math.cos(y / 2);
-        const c3 = Math.cos(z / 2);
-
-        const s1 = Math.sin(x / 2);
-        const s2 = Math.sin(y / 2);
-        const s3 = Math.sin(z / 2);
-
-        return this.setValues(
-            s1 * c2 * c3 + c1 * s2 * s3,
-            c1 * s2 * c3 - s1 * c2 * s3,
-            c1 * c2 * s3 + s1 * s2 * c3,
-            c1 * c2 * c3 - s1 * s2 * s3
-        );
-    }
-
-    public multiplyQuaternions(a: Quaternion, b: Quaternion)
-    {
-        QuaternionMultiply(a, b, this);
-        return this;
-    }
-
-    public multiply = (other: this) => this.multiplyQuaternions(this, other);
-
-    public premultiply = (other: this) => this.multiplyQuaternions(other, this);
-
-    public setFromRotationMatrix(mat: Matrix4x4)
-    {
-        const
-            m11 = mat[0], m12 = mat[4], m13 = mat[8],
-            m21 = mat[1], m22 = mat[5], m23 = mat[9],
-            m31 = mat[2], m32 = mat[6], m33 = mat[10],
-            trace = m11 + m22 + m33;
-
-        if (trace > 0)
-        {
-            const s = 0.5 / Math.sqrt(trace + 1.0);
-            return this.setValues((m32 - m23) * s, (m13 - m31) * s, (m21 - m12) * s, 0.25 / s);
-        }
-        else if (m11 > m22 && m11 > m33)
-        {
-            const s = 2.0 * Math.sqrt(1.0 + m11 - m22 - m33);
-            return this.setValues(0.25 * s, (m12 + m21) / s, (m13 + m31) / s, (m32 - m23) / s);
-        }
-        else if (m22 > m33)
-        {
-            const s = 2.0 * Math.sqrt(1.0 + m22 - m11 - m33);
-            return this.setValues((m12 + m21) / s, 0.25 * s, (m23 + m32) / s, (m13 - m31) / s);
-        }
-        else
-        {
-            const s = 2.0 * Math.sqrt(1.0 + m33 - m11 - m22);
-            return this.setValues((m13 + m31) / s, (m23 + m32) / s, 0.25 * s, (m21 - m12) / s);
-        }
-    }
-
-    public setFromUnitVectors(from: Vector3, to: Vector3)
-    {
-        const r = from.dot(to) + 1;
-
-        if (r < Number.EPSILON)
-        {
-            if (Math.abs(from.x) > Math.abs(from.z))
-            {
-                this.setValues(-from.y, from.x, 0, 0);
-            }
-            else
-            {
-                this.setValues(0, -from.z, from.y, 0);
-            }
-        }
-        else
-        {
-            this.setValues(
-                from.y * to.z - from.z * to.y,
-                from.z * to.x - from.x * to.z,
-                from.x * to.y - from.y * to.x,
-                r
-            );
-        }
-
-        return this.normalize();
     }
 }
 
@@ -747,27 +564,9 @@ class Matrix3x3 extends Float32Array
         ]);
     }
 
-    public clone = () => new Matrix3x3(this);
-
     public set(array: FixedLengthArray<number, 9> | Matrix3x3, offset?: number | undefined)
     {
         super.set(array, offset);
-        return this;
-    }
-
-    public copy(other: Matrix3x3)
-    {
-        return this.set(other);
-    }
-
-    public multiply(other: Matrix3x3)
-    {
-        return this.multiplyMatrices(this, other);
-    }
-
-    public multiplyMatrices(a: Matrix3x3, b: Matrix3x3)
-    {
-        Matrix3x3Multiply(a, b, this);
         return this;
     }
 
@@ -812,7 +611,10 @@ class Matrix4x4 extends Float32Array
         ]);
     }
 
-    public clone = () => new Matrix4x4(this);
+    public clone()
+    {
+        return new Matrix4x4(this);
+    }
 
     public set(array: FixedLengthArray<number, 16> | Matrix4x4, offset?: number | undefined)
     {
@@ -944,7 +746,10 @@ class Matrix4x4 extends Float32Array
         ]);
     }
 
-    public topLeft3x3 = () => new Matrix3x3([this[0], this[1], this[2], this[4], this[5], this[6], this[8], this[9], this[10]]);
+    public topLeft3x3()
+    {
+        return new Matrix3x3([this[0], this[1], this[2], this[4], this[5], this[6], this[8], this[9], this[10]]);
+    }
 }
 
 
@@ -958,33 +763,34 @@ const wasm = wasmModule.instance.exports as any & WebAssembly.Exports;
 
 function Matrix4x4Multiply(a: Matrix4x4, b: Matrix4x4, target: Matrix4x4)
 {
-    target.set(wasm.m4m(...a, ...b));
+    target.set(wasm["m4m"](...a, ...b));
 }
 
 function Matrix4x4Compose(pos: Vector3, rot: Quaternion, scale: Vector3, target: Matrix4x4)
 {
-    target.set(wasm.m4c(...pos, ...rot, ...scale));
+    target.set(wasm["m4c"](...pos, ...rot, ...scale));
 }
 
 // unused
-function Matrix3x3Multiply(a: Matrix3x3, b: Matrix3x3, target: Matrix3x3)
-{
-    // target.set(wasm.m3m(...a, ...b));
-}
+// function Matrix3x3Multiply(a: Matrix3x3, b: Matrix3x3, target: Matrix3x3)
+// {
+//     target.set(wasm.m3m(...a, ...b));
+// }
 
 function Matrix3x3Invert(m: Matrix3x3, target: Matrix3x3)
 {
-    target.set(wasm.m3i(...m));
+    target.set(wasm["m3i"](...m));
 }
 
-function QuaternionMultiply(a: Quaternion, b: Quaternion, target: Quaternion)
-{
-    target.set(wasm.qm(...a, ...b));
-}
+// unused
+// function QuaternionMultiply(a: Quaternion, b: Quaternion, target: Quaternion)
+// {
+//     target.set(wasm.qm(...a, ...b));
+// }
 
 function PointQuaternionMultiply(p: Vector3, q: Quaternion, target: Vector3)
 {
-    target.set(wasm.pqm(...p, ...q));
+    target.set(wasm["pqm"](...p, ...q));
 }
 
 
@@ -1000,9 +806,12 @@ class Transform
     public rotation = new Quaternion();
     public scale = new Vector3(1, 1, 1);
 
-    public matrix = () => new Matrix4x4().compose(this.position, this.rotation, this.scale);
+    public matrix()
+    {
+        return new Matrix4x4().compose(this.position, this.rotation, this.scale);
+    }
 
-    public matrixInverse = () =>
+    public matrixInverse()
     {
         const invRotation = this.rotation.clone().invert();
         return new Matrix4x4().compose(
@@ -1017,32 +826,11 @@ class Transform
 
 function CreateWebglProgram(vertexShaderSource: string, fragmentShaderSource: string, ...uniforms: string[])
 {
-    function LogShader(shaderSource: string)
-    {
-        const lines = shaderSource.split("\n");
-        const padCount = Math.log10(lines.length + 1) | 0 + 4;
-        console.error("\n" + lines.map((line, idx) => (idx + 1).toString().padEnd(padCount, " ") + line).join("\n"));
-    }
-
     function CreateShader(shaderType: number, shaderSource: string)
     {
-        const shaderObj = gl.createShader(shaderType);
-        if (!shaderObj)
-        {
-            throw new Error("Cannot create shader object");
-        }
-
+        const shaderObj = gl.createShader(shaderType)!;
         gl.shaderSource(shaderObj, shaderSource);
         gl.compileShader(shaderObj);
-
-        const shaderError = gl.getShaderInfoLog(shaderObj);
-        if (shaderError && shaderError.length !== 0)
-        {
-            console.error(shaderError);
-            LogShader(shaderSource);
-            throw new Error(`Error compiling ${shaderType === gl.VERTEX_SHADER ? "vertex" : "fragment"} shader`);
-        }
-
         return shaderObj;
     }
 
@@ -1054,24 +842,6 @@ function CreateWebglProgram(vertexShaderSource: string, fragmentShaderSource: st
     gl.attachShader(program, vertShaderObj);
     gl.attachShader(program, fragShaderObj);
     gl.linkProgram(program);
-
-    const success = gl.getProgramParameter(program, gl.LINK_STATUS) as boolean;
-
-    const programInfo = gl.getProgramInfoLog(program);
-    if (programInfo && programInfo.length !== 0)
-    {
-        if (success)
-        {
-            console.warn(programInfo);
-        }
-        else
-        {
-            console.error(programInfo);
-            throw new Error("Error linking program");
-        }
-    }
-
-    // gl.useProgram(program);
 
     const uniformLocations = new Map<string, WebGLUniformLocation>();
     uniforms.forEach(u => uniformLocations.set(u, gl.getUniformLocation(program, u)!));
@@ -1773,52 +1543,23 @@ class Renderable extends SceneNode
 
 
 
-function CreateWebglCanvas(appendCanvas = false, canvas: HTMLCanvasElement = document.createElement("canvas"))
+function CreateWebglCanvas(canvas: HTMLCanvasElement = document.createElement("canvas"))
 {
-    const gl = canvas.getContext("webgl2")!;
-
-    if (appendCanvas)
-    {
-        document.body.appendChild(canvas);
-        canvas.style.border = "2px solid red";
-    }
-
     const vertexShader = `#version 300 es
 in vec2 aVertexPosition;
 uniform float uAspect;
 out vec2 vPixelCoord;
 void main()
 {
-    vPixelCoord = (aVertexPosition + vec2(1)) * 0.5;
-    gl_Position = vec4(aVertexPosition, 0, 1);
+vPixelCoord = (aVertexPosition + vec2(1)) * 0.5;
+gl_Position = vec4(aVertexPosition, 0, 1);
 }`;
-
-    function LogShader(shaderSource: string)
-    {
-        const lines = shaderSource.split("\n");
-        const padCount = Math.log10(lines.length + 1) | 0 + 4;
-        console.error("\n" + lines.map((line, idx) => (idx + 1).toString().padEnd(padCount, " ") + line).join("\n"));
-    }
 
     function CreateShader(shaderType: number, shaderSource: string)
     {
-        const shaderObj = gl.createShader(shaderType);
-        if (!shaderObj)
-        {
-            throw new Error("Cannot create shader object");
-        }
-
+        const shaderObj = gl.createShader(shaderType)!;
         gl.shaderSource(shaderObj, shaderSource);
         gl.compileShader(shaderObj);
-
-        const shaderError = gl.getShaderInfoLog(shaderObj);
-        if (shaderError && shaderError.length !== 0)
-        {
-            console.error(shaderError);
-            LogShader(shaderSource);
-            throw new Error(`Error compiling ${shaderType === gl.VERTEX_SHADER ? "vertex" : "fragment"} shader`);
-        }
-
         return shaderObj;
     }
 
@@ -1863,23 +1604,6 @@ ${shaderMainImage}
         gl.attachShader(program, vertShaderObj);
         gl.attachShader(program, fragShaderObj);
         gl.linkProgram(program);
-
-        const success = gl.getProgramParameter(program, gl.LINK_STATUS) as boolean;
-
-        const programInfo = gl.getProgramInfoLog(program);
-        if (programInfo && programInfo.length !== 0)
-        {
-            if (success)
-            {
-                console.warn(programInfo);
-            }
-            else
-            {
-                console.error(programInfo);
-                throw new Error("Error linking program");
-            }
-        }
-
         gl.useProgram(program);
 
         // setup attributes and uniforms
@@ -1942,72 +1666,7 @@ ${shaderMainImage}
         gl.deleteTexture(texture);
     }
 
-    // for debug
-    function GetTexturePixels(texture: WebGLTexture, width: number, height: number, pixels?: Uint8ClampedArray)
-    {
-        pixels ??= new Uint8ClampedArray(width * height * 4);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        return pixels;
-    }
-
-    async function TextureToImage(texture: WebGLTexture, width: number, height: number)
-    {
-        DrawTexture(texture, width, height);
-        const dataUrl = canvas.toDataURL();
-
-        return await new Promise<HTMLImageElement>((resolve, reject) =>
-        {
-            const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = reject;
-            img.src = dataUrl;
-        });
-    }
-
-    const debugDrawVertexShader = `attribute vec2 aVertexPosition;
-varying vec2 vPixelCoord;
-void main()
-{
-    vPixelCoord = (aVertexPosition + vec2(1.0)) * 0.5;
-    gl_Position = vec4(aVertexPosition, 0.0, 1.0);
-}`;
-
-    const debugDrawFragmentShader = `precision highp float;
-varying vec2 vPixelCoord;
-uniform sampler2D tex;
-
-void main()
-{
-    gl_FragColor = texture2D(tex, vPixelCoord);
-}`;
-
-    const debugDrawProgram = gl.createProgram()!;
-    gl.attachShader(debugDrawProgram, CreateShader(gl.VERTEX_SHADER, debugDrawVertexShader));
-    gl.attachShader(debugDrawProgram, CreateShader(gl.FRAGMENT_SHADER, debugDrawFragmentShader));
-    gl.linkProgram(debugDrawProgram);
-
-    const debugDrawVertexLocation = gl.getAttribLocation(debugDrawProgram, "aVertexPosition");
-
-    function DrawTexture(texture: WebGLTexture, width: number, height: number)
-    {
-        canvas.width = width;
-        canvas.height = height;
-        gl.viewport(0, 0, width, height);
-
-        gl.useProgram(debugDrawProgram);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-
-
-        // draw
-        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-        gl.enableVertexAttribArray(debugDrawVertexLocation);
-        gl.vertexAttribPointer(debugDrawVertexLocation, 2, gl.FLOAT, false, 0, 0);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexPositions.length / 2);
-    }
-
-    return { DrawWithShader, CreateTexture, DeleteTexture, GetTexturePixels, DrawTexture, TextureToImage, canvas };
+    return { DrawWithShader, CreateTexture, DeleteTexture, canvas };
 }
 
 
@@ -2095,7 +1754,7 @@ class BoxCollider extends Collider
         this.transform.rotation.copyFrom(rotation);
         this.updateMatrix();
 
-        this.extents = size.clone().divScalar(2);
+        this.extents = size.clone().mulScalar(0.5);
     }
 
     public resolveCollision(point: Vector3, radius: number)
@@ -2346,40 +2005,27 @@ function GetOrCreateSpriteProgram()
     if (spriteProgram === null)
     {
         const vertexShaderSource = `#version 300 es
-
-        layout (location = 0)
-        in vec3 aVertexPosition;
-
-        out vec2 uv;
-
-        uniform mat4 viewProjectionMatrix;
-        uniform mat4 worldMat;
-
-        void main()
-        {
-            uv = aVertexPosition.xy + 0.5;
-            gl_Position = viewProjectionMatrix * worldMat * vec4(aVertexPosition, 1);
-        }
-
-        `;
+layout (location = 0)
+in vec3 aVertexPosition;
+out vec2 uv;
+uniform mat4 viewProjectionMatrix;
+uniform mat4 worldMat;
+void main()
+{
+    uv = aVertexPosition.xy + 0.5;
+    gl_Position = viewProjectionMatrix * worldMat * vec4(aVertexPosition, 1);
+}`;
 
         const fragmentShaderSource = `#version 300 es
-
-        precision highp float;
-
-        in vec2 uv;
-
-        out vec4 fragColor;
-
-        uniform sampler2D tex;
-
-        void main()
-        {
-            fragColor = texture(tex, uv);
-            if (fragColor.a < 0.01) discard;
-        }
-
-        `;
+precision highp float;
+in vec2 uv;
+out vec4 fragColor;
+uniform sampler2D tex;
+void main()
+{
+    fragColor = texture(tex, uv);
+    if (fragColor.a < 0.01) discard;
+}`;
 
         spriteProgram = CreateWebglProgram(vertexShaderSource, fragmentShaderSource, "viewProjectionMatrix", "worldMat", "tex");
     }
@@ -2705,7 +2351,7 @@ scene.add(new Skybox());
 
 const up = new Vector3(0, 1, 0);
 
-const ca = CreateWebglCanvas(false, canvas);
+const ca = CreateWebglCanvas(canvas);
 const plasticTexture = PlasticTexture(ca, 2048, 2048, 15, 0.5, 1, [1, 1, 1]);
 // const dirtTexture = DirtTexture(ca, 1024, 1024, 20, 0.1, 0.4, [1, 1, 1]);
 // const metalTexture = MetalTexture(ca, 1024, 1024, 20, 0, 0.6, [1, 1, 1]);
@@ -2826,7 +2472,7 @@ function CreateSimpleCollidableSphere(radius: number, px: number, py: number, pz
     return obj;
 }
 
-function CreateSawBladeLevelObject(sawSize: number = 3, px: number, py: number, pz: number, angle: number): LevelObject
+function CreateSawBladeLevelObject(sawSize: number, px: number, py: number, pz: number, angle: number): LevelObject
 {
     const sawCollider = new CollidableBox(new Vector3(sawSize, sawSize, 0.2), solidMaterial);
     sawCollider.mesh.visible = false;
