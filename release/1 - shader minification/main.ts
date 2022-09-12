@@ -4523,7 +4523,7 @@ async function Restart(reason: RestartReason)
 async function FinishLevel()
 {
     ++currentLevel;
-    if (currentLevel < levels.length - 1)
+    if (currentLevel < levels.length)
     {
         CreateLevel(levels[currentLevel]);
     }

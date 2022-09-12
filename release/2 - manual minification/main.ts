@@ -2,6 +2,257 @@
 (async () =>
 {
 
+const canvas = document.createElement("canvas");
+
+canvas.style.position = "absolute";
+canvas.style.top = "0px";
+canvas.style.left = "0px";
+
+const gl = canvas.getContext("webgl2")!;
+
+function NormalMapShader(intensity: number, invert = false)
+{
+    intensity = invert ? -intensity : intensity;
+    return `
+const vec3 off = vec3(-1, 1, 0);
+
+float top = texture(t0, vPixelCoord + pixelSize * off.zy).x;
+float bottom = texture(t0, vPixelCoord + pixelSize * off.zx).x;
+float left = texture(t0, vPixelCoord + pixelSize * off.xz).x;
+float right = texture(t0, vPixelCoord + pixelSize * off.yz).x;
+
+vec3 normal = vec3(float(${intensity}) * (left - right), float(${intensity}) * (bottom - top), pixelSize.y * 100.0);
+outColor = vec4(normalize(normal) * 0.5 + 0.5, 1);
+`;
+}
+
+
+// https://iquilezles.org/www/articles/fbm/fbm.htm
+// https://www.shadertoy.com/view/XdXGW8
+
+const FBM = `
+vec2 grad(ivec2 z)  // replace this anything that returns a random vector
+{
+    // 2D to 1D (feel free to replace by some other)
+    int n = z.x + z.y * 11111;
+
+    // Hugo Elias hash (feel free to replace by another one)
+    n = (n << 13) ^ n;
+    n = (n * (n * n * 15731 + 789221) + 1376312589) >> 16;
+
+    // simple random vectors
+    return vec2(cos(float(n)), sin(float(n)));
+}
+
+float noise(vec2 p)
+{
+    ivec2 i = ivec2(floor(p));
+    vec2 f = fract(p);
+
+    vec2 u = f * f * (3.0 - 2.0 * f); // feel free to replace by a quintic smoothstep instead
+    ivec2 oi = ivec2(0, 1);
+    vec2 of = vec2(oi);
+
+    return mix(mix(dot(grad(i + oi.xx), f - of.xx),
+                   dot(grad(i + oi.yx), f - of.yx), u.x),
+               mix(dot(grad(i + oi.xy), f - of.xy),
+                   dot(grad(i + oi.yy), f - of.yy), u.x), u.y)
+        * 0.5 + 0.5;
+}
+
+float fbm(vec2 p, int numOctaves, float scale, float lacunarity)
+{
+    float t = 0.0;
+    float z = 1.0;
+    for (int i = 0; i < numOctaves; ++i)
+    {
+        z *= 0.5;
+        t += z * noise(p * scale);
+        p = p * lacunarity;
+    }
+
+    return t / (1.0 - z);
+}
+`;
+
+
+
+interface TextureCollection
+{
+    albedo: WebGLTexture;
+    normalMap: WebGLTexture;
+    roughness: WebGLTexture;
+}
+
+// x - cell color, y - distance to cell
+const VoronoiGrayscale = `
+vec2 voronoi(vec2 x, float w)
+{
+    vec2 n = floor(x);
+    vec2 f = fract(x);
+
+    vec2 m = vec2(0.0, 8.0);
+    for (int j = -2; j <= 2; ++j)
+    for (int i = -2; i <= 2; ++i)
+    {
+        vec2 g = vec2(i, j);
+        vec2 o = hash2(n + g);
+
+        // distance to cell
+        float d = length(g - f + o);
+
+        // cell color
+        float col = 0.5 + 0.5 * sin(hash1(dot(n + g, vec2(7.0, 113.0))) * 2.5 + 5.0);
+
+        // do the smooth min for colors and distances
+        float h = smoothstep(0.0, 1.0, 0.5 + 0.5 * (m.y - d) / w);
+        m.y = mix(m.y, d, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // distance
+        m.x = mix(m.x, col, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // color
+    }
+
+    return m;
+}
+`;
+
+
+const ShaderUtils = `
+float hash1(float n)
+{
+    return fract(sin(n) * 43758.5453);
+}
+
+vec2 hash2(vec2 p)
+{
+    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+    return fract(sin(p)*43758.5453);
+}
+
+float saturate(float x)
+{
+    return clamp(x, 0.0, 1.0);
+}
+
+float unlerp(float a, float b, float x)
+{
+    return (x - a) / (b - a);
+}
+
+float remap(float from0, float from1, float to0, float to1, float x)
+{
+    return mix(to0, to1, unlerp(from0, from1, x));
+}
+
+float sharpstep(float edge0, float edge1, float x)
+{
+    return saturate(unlerp(edge0, edge1, x));
+}
+
+vec4 colorRamp2(vec4 colorA, float posA, vec4 colorB, float posB, float t)
+{
+    return mix(colorA, colorB, sharpstep(posA, posB, t));
+}
+
+float valueRamp2(float colorA, float posA, float colorB, float posB, float t)
+{
+    return mix(colorA, colorB, sharpstep(posA, posB, t));
+}
+
+`;
+
+const edgeBlend = (fnName: string, blend = 0.2) => `
+vec4 edgeBlend(vec2 uv)
+{
+    const vec2 fadeWidth = vec2(${blend});
+    const vec2 scaling = 1.0 - fadeWidth;
+    vec2 offsetuv = uv * scaling;
+    vec2 blend = clamp((uv - scaling) / fadeWidth, 0.0, 1.0);
+
+    return
+        blend.y * blend.x * ${fnName}(fract(offsetuv + (fadeWidth * 2.0))) +
+        blend.y * (1.0 - blend.x) * ${fnName}(vec2(fract(offsetuv.x + fadeWidth.x), fract(offsetuv.y + (fadeWidth.y * 2.0)))) +
+        (1.0 - blend.y) * (1.0 - blend.x) * ${fnName}(fract(offsetuv + fadeWidth)) +
+        (1.0 - blend.y) * blend.x * ${fnName}(vec2(fract(offsetuv.x + (fadeWidth.x * 2.0)), fract(offsetuv.y + fadeWidth.y)));
+}
+
+`;
+
+// Generated with Shader Minifier 1.2 - http://www.ctrl-alt-test.fr
+var var_AVERTEXPOSITION = "e"
+var var_ALBEDO = "p"
+var var_BASECOLOR = "S"
+var var_DEPTHMVP = "q"
+var var_DEPTHMAP = "a"
+var var_FRAGCOLOR = "m"
+var var_HASALBEDO = "D"
+var var_HASNORMALMAP = "g"
+var var_HASROUGHNESSMAP = "P"
+var var_HUESHIFT = "r"
+var var_LIGHTINTENSITY = "X"
+var var_LIGHTPOS = "T"
+var var_LIGHTPOSWORLD = "R"
+var var_METALLIC = "Y"
+var var_MODELNORMAL = "L"
+var var_MODELPOS = "M"
+var var_NORMALMAP = "d"
+var var_OFFSET = "U"
+var var_PLAYERPOSITION = "Q"
+var var_ROUGHNESS = "Z"
+var var_ROUGHNESSMAP = "w"
+var var_SCALE = "V"
+var var_SHADOWMVP = "i"
+var var_SHADOWPOS = "v"
+var var_SHARPNESS = "W"
+var var_SUNPOS = "f"
+var var_TEX = "B"
+var var_UTIME = "n"
+var var_UV = "A"
+var var_VDIRECTION = "x"
+var var_VNORMAL = "F"
+var var_VPOSITION = "G"
+var var_VERTEXPOSITION = "o"
+var var_VIEWNORMAL = "N"
+var var_VIEWPOS = "O"
+var var_VIEWPROJECTIONMATRIX = "c"
+var var_WORLDMAT = "t"
+var var_WORLDNORMAL = "J"
+var var_WORLDNORMALMAT = "h"
+var var_WORLDPOS = "K"
+var var_WORLDVIEWMAT = "E"
+var var_WORLDVIEWNORMALMAT = "b"
+var var_WORLDVIEWPROJMAT = "C"
+
+var lava_vs = `#version 300 es
+layout(location=0)in vec4 e;out vec2 o;out vec4 v;uniform mat4 c,t,i;void main(){o=e.xy,o.y+=e.z,v=i*t*e*.5+.5,gl_Position=c*t*e;}`
+
+var lava_fs = `#version 300 es
+precision highp float;precision highp sampler2DShadow;uniform float n;uniform sampler2DShadow a;uniform bool r;in vec2 o;in vec4 v;out vec4 m;
+${ShaderUtils}
+${FBM}
+vec3 l(vec3 k,vec2 A,float j,float aa,float ab,float ac,float ad){vec3 ae=vec3(.1+abs(sin(n))*.03,.02,.02);A*=j;float af=1.;vec2 ag=floor(A),ah=fract(A);float ai=noise(A)*ad;for(int aj=-1;aj<=1;++aj)for(int ak=-1;ak<=1;++ak){vec2 al=vec2(aj,ak),am=hash2(ag+al)+ai;am=.5+.5*sin(n*.35+6.2831*am);af=min(af,length(al+am-ah));}float an=noise(A*.1+n*.2*ac)-.8;an*=6.;vec3 ao=vec3(k*pow(af,aa+an*.95)*ab);ao=mix(ae,ao,af);return ao;}void main(){vec2 A=o*.1;m=vec4(0,0,0,1);m.xyz+=l(vec3(1.5,.4,0),A,3.,2.5,1.15,.5,.5);m.xyz+=l(vec3(1.5,0,0),A,6.,3.,.4,.3,0.);m.xyz+=l(vec3(1.2,.4,0),A,8.,4.,.2,.6,.5);if(r)m=m.yxzx;else{float ap=0.;vec3 aq=v.xyz/v.w;vec2 ar=abs(vec2(.5)-aq.xy);if(aq.z>1.||ar.x>.5||ar.y>.5)ap=1.;else ap=texture(a,aq)*.5+.5;m.xyz=min(m.xyz,vec3(1))*ap;}}`
+
+var skybox_fs = `#version 300 es
+precision highp float;in vec3 x;out vec4 m;uniform vec3 f;const float u=.2;const vec3 s=vec3(1.,.2,0.),y=vec3(1,.9,.8);vec3 l(float as){return max(exp(-pow(as,.3))*y-.4,0.);}vec3 z(vec3 at){float au=distance(at,f)*2.,av=min(au,1.),aw=1.-smoothstep(.01,.011,av),as=max(at.y+.2,.001);as=u*mix(av,1.,as)/as;vec3 ax=l(au),k=as*s;k=max(mix(pow(k,1.-k),k/(2.*k+.5-k),clamp(f.y*2.,0.,1.)),0.)+aw+ax;k*=pow(1.-av,10.)*8.+1.;float ay=abs(f.y*.5-.5);return mix(k,vec3(0.),min(ay,1.));}void main(){m=vec4(z(normalize(x)),1);}`
+
+var skybox_vs = `#version 300 es
+layout(location=0)in vec3 e;out vec3 x;uniform mat4 c;void main(){x=e,gl_Position=(mat3(c)*x).xyzz;}`
+
+var standard_material_fs = `#version 300 es
+precision highp float;precision highp sampler2DShadow;uniform sampler2D p,d,w;uniform sampler2DShadow a;uniform mat3 h,b;uniform bool D,g,P;uniform vec4 S;uniform float Z,Y,X,W;uniform vec3 V,U,T,R,Q;in vec3 O,N,M,L,K,J;in vec4 v;out vec4 m;vec3 I(vec3 az){vec3 aA=pow(abs(az),vec3(W));float aB=dot(aA,vec3(1));return aA/vec3(aB);}vec4 I(sampler2D B,vec3 aC,vec3 az){vec3 aD=I(az);vec4 aE=texture(B,aC.yz),aF=texture(B,aC.zx),aG=texture(B,aC.xy);return aE*aD.x+aF*aD.y+aG*aD.z;}vec3 l(sampler2D B,vec3 aC,vec3 az){vec3 aD=I(az);vec2 aH=aC.zy,aI=aC.xz,aJ=aC.xy;vec3 aK=texture(B,aH).xyz*2.-1.,aL=texture(B,aI).xyz*2.-1.,aM=texture(B,aJ).xyz*2.-1.,aN=vec3(0.,aK.yx),aO=vec3(aL.x,0.,aL.y),aP=vec3(aM.xy,0.);return normalize(aN*aD.x+aO*aD.y+aP*aD.z+az);}const float H=acos(-1.);float I(vec3 aQ,vec3 aR){return max(dot(aQ,aR),0.);}vec3 l(vec3 k,float aS){return k+(1.-k)*pow(1.-aS,5.);}vec3 I(vec3 aT,vec3 aU,vec3 aV,vec3 aW,vec3 aX,vec3 aY,vec3 aZ,float ba){float bb=I(aT,aV);vec3 bc=normalize(aV+aU),bd=l(aZ,dot(aV,bc));float be=pow(I(aT,bc),ba)*(ba+2.)/8.;vec3 bf=bd*be,bg=aY;float ap=0.;vec3 aq=v.xyz/v.w;vec2 ar=abs(vec2(.5)-aq.xy);if(aq.z>1.||ar.x>.5||ar.y>.5)ap=1.;else{float bh=max(.001*(1.-dot(normalize(J),R)),1e-4);aq.z-=bh/v.w;ap=texture(a,aq);}float as=distance(K.xz,Q.xz),bi=1.-smoothstep(.45,.5,as);bi*=smoothstep(0.,.4,Q.y-K.y);ap*=1.-bi;vec3 bj=ap*(bg+bf)*bb*aW;bj+=aY*aX;return bj;}vec3 z(vec3 aT,vec3 aU){vec3 bk=M,bl=normalize(L);aT=g?normalize(b*l(d,bk*V+U,bl)):aT;vec3 bm=D?I(p,bk*V+U,bl).xyz*S.xyz:S.xyz;float bn=P?I(w,bk*V+U,bl).x:Z;const vec3 bo=vec3(.04,.04,.04),bp=vec3(0.,0.,0.);vec3 aY=mix(bm*(1.-bo.x),bp,Y)/H,aZ=mix(bo,bm,Y);bn=1.2-.2/clamp(bn,1e-5,.99999);float ba=log(2.-bn)*185.;vec3 bj=vec3(0.,0.,0.),aV=T,bq=vec3(1.,.8,.5),br=vec3(1.,.9,.7)*1.5*(1.-I(J,-R)*.1);bj+=I(aT,aU,aV,bq,br,aY,aZ,ba);return bj;}void main(){vec3 aT=normalize(N),aU=normalize(-O),bs=z(aT,aU);m=vec4(bs,S.w);}`
+
+var standard_material_vs = `#version 300 es
+layout(location=0)in vec4 G;layout(location=1)in vec3 F;out vec3 O,N,M,L,K,J;out vec4 v;uniform mat4 t;uniform mat3 h;uniform mat4 E;uniform mat3 b;uniform mat4 C,i;void main(){O=(E*G).xyz,N=b*F,M=G.xyz,L=F,K=(t*G).xyz,J=h*F,gl_Position=C*G,v=i*t*G*.5+.5;}`
+
+var shadow_fs = `#version 300 es
+precision highp float;uniform sampler2D B;in vec2 A;void main(){if(texture(B,A).w<.5)discard;}`
+
+var shadow_vs = `#version 300 es
+layout(location=0)in vec4 G;out vec2 A;uniform mat4 q,t;void main(){A=G.xy+.5,gl_Position=q*t*G;}`
+
+
+
+
+
+
 document.title = "The Deadly™ Obstacle Course";
 await new Promise(requestAnimationFrame);
 
@@ -764,7 +1015,7 @@ class Transform
 
 
 
-function CreateWebglProgram(gl: WebGL2RenderingContext, vertexShaderSource: string, fragmentShaderSource: string, ...uniforms: string[])
+function CreateWebglProgram(vertexShaderSource: string, fragmentShaderSource: string, ...uniforms: string[])
 {
     function LogShader(shaderSource: string)
     {
@@ -843,348 +1094,44 @@ interface Material
 }
 
 let standardMaterialProgram: ReturnType<typeof CreateWebglProgram> | null = null;
-function GetOrCreateStandardMaterial(gl: WebGL2RenderingContext)
+function GetOrCreateStandardMaterial()
 {
     if (standardMaterialProgram === null)
     {
-        const vertexShaderSource = `#version 300 es
-        layout (location = 0)
-        in vec4 vPosition;                      // position in modelSpace
-        layout (location = 1)
-        in vec3 vNormal;                        // normal in modelSpace
+        const vertexShaderSource = standard_material_vs;
+        const fragmentShaderSource = standard_material_fs;
 
-        out vec3 viewPos;                       // position in viewSpace
-        out vec3 viewNormal;                    // normal in viewSpace
-        out vec3 modelPos;                      // position in modelSpace
-        out vec3 modelNormal;                   // normal in modelSpace
-        out vec3 worldPos;                      // position in worldSpace
-        out vec3 worldNormal;                   // normal in worldSpace
-        out vec4 shadowPos;
-
-        uniform mat4 worldMat;                  // transforms from modelSpace to worldSpace
-        uniform mat3 worldNormalMat;            // transforms normal vectors from modelSpace to worldSpace
-        uniform mat4 worldViewMat;              // transforms from modelSpace to viewSpace
-        uniform mat3 worldViewNormalMat;        // transforms normal vectors from modelSpace to viewSpace
-        uniform mat4 worldViewProjMat;          // transforms from modelSpace to NDC space
-        uniform mat4 shadowMVP;
-
-        void main()
-        {
-            viewPos = (worldViewMat * vPosition).xyz;
-            viewNormal = worldViewNormalMat * vNormal;
-            modelPos = vPosition.xyz;
-            modelNormal = vNormal;
-            worldPos = (worldMat * vPosition).xyz;
-            worldNormal = worldNormalMat * vNormal;
-            gl_Position = worldViewProjMat * vPosition;
-            shadowPos = shadowMVP * worldMat * vPosition * 0.5 + 0.5;
-        }
-`;
-
-        const fragmentShaderSource = `#version 300 es
-
-        precision highp float;
-        precision highp sampler2DShadow;
-
-        uniform sampler2D albedo;
-        uniform sampler2D normalMap;
-        uniform sampler2D roughnessMap;
-        uniform sampler2DShadow depthMap;
-
-        uniform mat3 worldNormalMat;
-        uniform mat3 worldViewNormalMat;
-
-        uniform bool hasAlbedo;
-        uniform bool hasNormalMap;
-        uniform bool hasRoughnessMap;
-
-        uniform vec4 baseColor;
-        uniform float roughness;
-        uniform float metallic;
-        uniform float lightIntensity;
-
-        uniform float sharpness;
-        uniform vec3 scale;
-        uniform vec3 offset;
-
-        uniform vec3 lightPos;
-        uniform vec3 lightPosWorld;
-        uniform vec3 playerPosition;
-
-        in vec3 viewPos;
-        in vec3 viewNormal;
-        in vec3 modelPos;
-        in vec3 modelNormal;
-        in vec3 worldPos;
-        in vec3 worldNormal;
-        in vec4 shadowPos;
-        out vec4 fragColor;
-
-
-        vec3 triplanarBlendFactor(vec3 normal)
-        {
-            vec3 weights = pow(abs(normal), vec3(sharpness));
-            float dotValue = dot(weights, vec3(1));
-            return weights / vec3(dotValue);
-        }
-
-        vec4 tex2DTriplanar(sampler2D tex, vec3 uvw, vec3 normal)
-        {
-            vec3 blend = triplanarBlendFactor(normal);
-
-            // read the three texture projections, for x,y,z axes
-            vec4 cx = texture(tex, uvw.yz);
-            vec4 cy = texture(tex, uvw.zx);
-            vec4 cz = texture(tex, uvw.xy);
-
-            // blend the textures based on weights
-            return cx * blend.x + cy * blend.y + cz * blend.z;
-        }
-
-        // https://bgolus.medium.com/normal-mapping-for-a-triplanar-shader-10bf39dca05a
-        vec3 getTriplanarNormal(sampler2D tex, vec3 uvw, vec3 normal)
-        {
-            vec3 blend = triplanarBlendFactor(normal);
-
-            // Triplanar uvs
-            vec2 uvX = uvw.zy; // x facing plane
-            vec2 uvY = uvw.xz; // y facing plane
-            vec2 uvZ = uvw.xy; // z facing plane
-
-            // Tangent space normal maps
-            vec3 tnormalX = texture(tex, uvX).rgb * 2.0 - 1.0;
-            vec3 tnormalY = texture(tex, uvY).rgb * 2.0 - 1.0;
-            vec3 tnormalZ = texture(tex, uvZ).rgb * 2.0 - 1.0;
-
-            // Swizzle tangent normals into world space and zero out "z"
-            vec3 normalX = vec3(0.0, tnormalX.yx);
-            vec3 normalY = vec3(tnormalY.x, 0.0, tnormalY.y);
-            vec3 normalZ = vec3(tnormalZ.xy, 0.0);
-
-            // Triblend normals and add to world normal
-            return normalize(
-                normalX * blend.x +
-                normalY * blend.y +
-                normalZ * blend.z +
-                normal
-            );
-        }
-
-
-        const float PI = 3.1415926535897932384626433832795;
-
-        float clampedDot(vec3 a, vec3 b)
-        {
-            return max(dot(a, b), 0.0);
-        }
-
-        vec3 fresnel(vec3 color, float dotAngle)
-        {
-            // Schlick's approximation
-            return color + (1.0 - color) * pow(1.0 - dotAngle, 5.0);
-        }
-
-        vec3 calculateReflectance(
-            vec3 N, vec3 V,
-            vec3 L, vec3 lightDirect, vec3 lightAmbient,
-            vec3 cDiff, vec3 F0, float specPower)
-        {
-            float lambertTerm = clampedDot(N, L);
-
-            // calculate half vector
-            vec3 H = normalize(L + V);
-
-            vec3 F = fresnel(F0, dot(L, H));
-
-            // normal distribution term multiplied with implicit Geometry term (with normalization factor)
-            float GD = pow(clampedDot(N, H), specPower) * (specPower + 2.0) / 8.0;
-
-            vec3 specular = F * GD;
-            vec3 diffuse = cDiff;
-
-
-            float shadowLightValue = 0.0;
-            vec3 shadowPosLightSpace = shadowPos.xyz / shadowPos.w;
-            vec2 uvDistanceFromCenter = abs(vec2(0.5) - shadowPosLightSpace.xy);
-
-            if (shadowPosLightSpace.z > 1.0 || uvDistanceFromCenter.x > 0.5 || uvDistanceFromCenter.y > 0.5)
-            {
-                // if the coordinate is outside the shadowmap, then it's in light
-                shadowLightValue = 1.0;
-            }
-            else
-            {
-                float bias = max(0.001 * (1.0 - dot(normalize(worldNormal), lightPosWorld)), 0.0001);
-                // float bias = 0.005;
-                shadowPosLightSpace.z -= bias / shadowPos.w;
-
-                shadowLightValue = texture(depthMap, shadowPosLightSpace);
-                // shadowLightValue = 0.0;
-            }
-
-            float dist = distance(worldPos.xz, playerPosition.xz);
-            float playerShadow = 1.0 - smoothstep(0.45, 0.5, dist);
-            playerShadow *= smoothstep(0.0, 0.4, playerPosition.y - worldPos.y);
-            shadowLightValue *= 1.0 - playerShadow;
-
-            // debug disable shadows
-            // shadowLightValue = 1.0;
-
-            vec3 refl = shadowLightValue * (diffuse + specular) * lambertTerm * lightDirect;
-            refl += cDiff * lightAmbient;
-
-            return refl;
-        }
-
-
-        vec3 calculateReflectances(vec3 N, vec3 V)
-        {
-        #if 0 // triplanar use world space
-
-            vec3 triplanarPos = worldPos;
-            vec3 triplanarNormal = normalize(worldNormal);
-
-        #else // triplanar use model space
-
-            vec3 triplanarPos = modelPos;
-            vec3 triplanarNormal = normalize(modelNormal);
-
-        #endif
-
-            // normal map
-            N = hasNormalMap
-                ? normalize(worldViewNormalMat * getTriplanarNormal(normalMap, triplanarPos * scale + offset, triplanarNormal))
-                : N;
-
-            // albedo/specular base
-            vec3 col = hasAlbedo
-                ? tex2DTriplanar(albedo, triplanarPos * scale + offset, triplanarNormal).rgb * baseColor.rgb
-                : baseColor.rgb;
-
-            // roughness TODO? needs testing
-            float rgh = hasRoughnessMap
-                ? tex2DTriplanar(roughnessMap, triplanarPos * scale + offset, triplanarNormal).r
-                : roughness;
-
-            const vec3 dielectricSpecular = vec3(0.04, 0.04, 0.04);
-            const vec3 black = vec3(0.0, 0.0, 0.0);
-
-            // sub-surface scattering reflectance
-            vec3 cDiff = mix(col * (1.0 - dielectricSpecular.r), black, metallic) / PI;
-
-            // fresnel reflectance at normal incidence
-            vec3 F0 = mix(dielectricSpecular, col, metallic);
-
-            // map roughness in [0,1] into shininess in [0, 128] with a logarithmic rate
-            rgh = 1.2 - 0.2 / clamp(rgh, 0.00001, 0.99999);
-            float specPower = log(2.0 - rgh) * 185.0;
-
-            // total irradiance
-            vec3 refl = vec3(0.0, 0.0, 0.0);
-
-            vec3 lightPositions[] = vec3[1](lightPos);
-            vec3 lightColors[] = vec3[1](vec3(1.0, 0.8, 0.5) * 1.0);
-            vec3 lightAmbientColors[] = vec3[1](vec3(1.0, 0.9, 0.7) * 1.5);
-
-            vec3 hemisphereLightPosition = normalize(-lightPos);
-
-            // for (int i = 0; i < lightPositions.length(); ++i)
-            int i = 0;
-            {
-                vec3 L = lightPositions[i];
-                vec3 cL = lightColors[i];
-                vec3 aL = lightAmbientColors[i] * (1.0 - clampedDot(worldNormal, -lightPosWorld) * 0.1);
-                refl += calculateReflectance(
-                    N, V,
-                    L, cL, aL,
-                    cDiff, F0, specPower);
-            }
-
-            return refl;
-        }
-
-        void main()
-        {
-            vec3 N = normalize(viewNormal);
-            vec3 V = normalize(-viewPos);
-            vec3 rgb = calculateReflectances(N, V);
-
-        #if 0
-            // final gamma correction
-            // rgb *= rgb;
-            rgb = sqrt(rgb);
-        #endif
-
-            fragColor = vec4(rgb, baseColor.a);
-        }
-`;
-
-        standardMaterialProgram = CreateWebglProgram(gl, vertexShaderSource, fragmentShaderSource,
-            "worldViewMat", "worldViewNormalMat", "worldViewProjMat", "worldMat", "worldNormalMat", "shadowMVP",
-            "albedo", "normalMap", "roughnessMap", "depthMap",
-            "hasAlbedo", "hasNormalMap", "hasRoughnessMap",
-            "baseColor", "metallic", "roughness", "lightIntensity",
-            "sharpness", "scale", "offset",
-            "lightPos", "lightPosWorld", "playerPosition"
+        standardMaterialProgram = CreateWebglProgram(vertexShaderSource, fragmentShaderSource,
+            var_WORLDVIEWMAT, var_WORLDVIEWNORMALMAT, var_WORLDVIEWPROJMAT, var_WORLDMAT, var_WORLDNORMALMAT, var_SHADOWMVP,
+            var_ALBEDO, var_NORMALMAP, var_ROUGHNESSMAP, var_DEPTHMAP,
+            var_HASALBEDO, var_HASNORMALMAP, var_HASROUGHNESSMAP,
+            var_BASECOLOR, var_METALLIC, var_ROUGHNESS, var_LIGHTINTENSITY,
+            var_SHARPNESS, var_SCALE, var_OFFSET,
+            var_LIGHTPOS, var_LIGHTPOSWORLD, var_PLAYERPOSITION
         );
 
         gl.useProgram(standardMaterialProgram.program);
-        gl.uniform1i(standardMaterialProgram.uniformLocations.get("albedo")!, 0);
-        gl.uniform1i(standardMaterialProgram.uniformLocations.get("normalMap")!, 1);
-        gl.uniform1i(standardMaterialProgram.uniformLocations.get("roughnessMap")!, 2);
-        gl.uniform1i(standardMaterialProgram.uniformLocations.get("depthMap")!, 3);
+        gl.uniform1i(standardMaterialProgram.uniformLocations.get(var_ALBEDO)!, 0);
+        gl.uniform1i(standardMaterialProgram.uniformLocations.get(var_NORMALMAP)!, 1);
+        gl.uniform1i(standardMaterialProgram.uniformLocations.get(var_ROUGHNESSMAP)!, 2);
+        gl.uniform1i(standardMaterialProgram.uniformLocations.get(var_DEPTHMAP)!, 3);
     }
 
     return standardMaterialProgram;
 }
 
 let shadowProgram: ReturnType<typeof CreateWebglProgram> | null = null;
-function GetOrCreateShadowProgram(gl: WebGL2RenderingContext)
+function GetOrCreateShadowProgram()
 {
     if (shadowProgram === null)
     {
-        shadowProgram = CreateWebglProgram(gl,
-`#version 300 es
-
-layout (location = 0)
-in vec4 vPosition;
-out vec2 uv;
-
-uniform mat4 depthMVP;
-uniform mat4 worldMat;
-
-void main()
-{
-    uv = vPosition.xy + 0.5;
-    gl_Position = depthMVP * worldMat * vPosition;
-}
-`,
-
-`#version 300 es
-
-precision highp float;
-
-uniform sampler2D tex;
-
-in vec2 uv;
-
-void main()
-{
-    if (texture(tex, uv).a < 0.5)
-    {
-        discard;
-    }
-}
-`,
-            "depthMVP", "worldMat", "tex"
+        shadowProgram = CreateWebglProgram(shadow_vs, shadow_fs,
+            var_DEPTHMVP, var_WORLDMAT, var_TEX
         );
     }
 
     return shadowProgram;
 }
-
-
-
 
 
 
@@ -1203,18 +1150,12 @@ interface ViewMatrices
 
 class SceneNode
 {
-    public gl: WebGL2RenderingContext;
     public children = new Set<SceneNode>();
     protected parent: SceneNode | null = null;
     public transform = new Transform();
 
     public visible = true;
     public renderOrder = 0;
-
-    constructor(gl: WebGL2RenderingContext)
-    {
-        this.gl = gl;
-    }
 
     public add(node: SceneNode)
     {
@@ -1295,9 +1236,9 @@ class DirectionalLight extends Camera
     public worldMatLocation: WebGLUniformLocation;
     public target = new Vector3();
 
-    constructor(gl: WebGL2RenderingContext, size: number)
+    constructor(size: number)
     {
-        super(gl);
+        super();
 
         this.resolution = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), 2048);
 
@@ -1317,7 +1258,7 @@ class DirectionalLight extends Camera
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.depthFrameBuffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.TEXTURE_2D, this.depthTexture, 0);
 
-        this.worldMatLocation = GetOrCreateShadowProgram(gl).uniformLocations.get("worldMat")!;
+        this.worldMatLocation = GetOrCreateShadowProgram().uniformLocations.get(var_WORLDMAT)!;
     }
 
     public prepare(camera: Camera, centerDistanceFromCamer: number)
@@ -1328,9 +1269,9 @@ class DirectionalLight extends Camera
         const lightView = new Matrix4x4().lookAt(frustumCenter.clone().add(lightDirection), frustumCenter, new Vector3(0, 1, 0));
 
         this.depthMVP.copy(this.projectionMatrix).multiply(lightView);
-        const shadowProgram = GetOrCreateShadowProgram(this.gl);
-        this.gl.useProgram(shadowProgram.program);
-        this.gl.uniformMatrix4fv(shadowProgram.uniformLocations.get("depthMVP")!, false, this.depthMVP);
+        const shadowProgram = GetOrCreateShadowProgram();
+        gl.useProgram(shadowProgram.program);
+        gl.uniformMatrix4fv(shadowProgram.uniformLocations.get(var_DEPTHMVP)!, false, this.depthMVP);
     }
 }
 
@@ -1339,35 +1280,35 @@ class Scene extends SceneNode
     public light: DirectionalLight;
     public playerPosition = new Vector3();
 
-    constructor(gl: WebGL2RenderingContext)
+    constructor()
     {
-        super(gl);
+        super();
 
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
         gl.enable(gl.CULL_FACE);
         gl.cullFace(gl.BACK);
 
-        this.light = new DirectionalLight(gl, 70);
+        this.light = new DirectionalLight(70);
         this.light.transform.position.setValues(0, 1, 1);
     }
 
     public renderScene(camera: Camera)
     {
         // shadow maps first
-        this.gl.viewport(0, 0, this.light.resolution, this.light.resolution);
-        // this.gl.cullFace(this.gl.FRONT);
-        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.light.depthFrameBuffer);
-        this.gl.clear(this.gl.DEPTH_BUFFER_BIT);
+        gl.viewport(0, 0, this.light.resolution, this.light.resolution);
+        // gl.cullFace(gl.FRONT);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.light.depthFrameBuffer);
+        gl.clear(gl.DEPTH_BUFFER_BIT);
         this.light.prepare(camera, 35);
         this.renderSceneInternal(this.light, RenderMode.Shadow, this.light);
-        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
-        // this.gl.cullFace(this.gl.BACK);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        // gl.cullFace(gl.BACK);
 
         // normal render
-        this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height);
-        this.gl.clearColor(0, 0, 0, 1);
-        this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         this.renderSceneInternal(camera, RenderMode.Normal, this.light);
     }
 
@@ -1788,9 +1729,9 @@ class Renderable extends SceneNode
     private vertexBuffer: WebGLBuffer;
     private indexBuffer: WebGLBuffer;
 
-    constructor(gl: WebGL2RenderingContext, geometry: Geometry, positionLoc: number, normalLoc?: number)
+    constructor(geometry: Geometry, positionLoc: number, normalLoc?: number)
     {
-        super(gl);
+        super();
 
         this.vao = gl.createVertexArray()!;
         gl.bindVertexArray(this.vao);
@@ -1824,8 +1765,8 @@ class Renderable extends SceneNode
     public dispose()
     {
         super.dispose();
-        this.gl.deleteBuffer(this.vertexBuffer);
-        this.gl.deleteBuffer(this.indexBuffer);
+        gl.deleteBuffer(this.vertexBuffer);
+        gl.deleteBuffer(this.indexBuffer);
     }
 }
 
@@ -2071,86 +2012,14 @@ void main()
 
 
 let skyboxProgram: ReturnType<typeof CreateWebglProgram> | null = null;
-function GetOrCreateSkyboxProgram(gl: WebGL2RenderingContext)
+function GetOrCreateSkyboxProgram()
 {
     if (skyboxProgram === null)
     {
-        const vertexShaderSource = `#version 300 es
+        const vertexShaderSource = skybox_vs;
+        const fragmentShaderSource = skybox_fs;
 
-        layout (location = 0)
-        in vec3 aVertexPosition;
-
-        out vec3 vDirection;
-
-        uniform mat4 viewProjectionMatrix;
-
-        void main()
-        {
-            vDirection = aVertexPosition;
-            gl_Position = (mat3(viewProjectionMatrix) * vDirection).xyzz;
-        }
-
-        `;
-
-        const fragmentShaderSource = `#version 300 es
-
-        precision highp float;
-
-        in vec3 vDirection;
-        out vec4 fragColor;
-
-        uniform vec3 sunPos; // must be normalized
-
-
-        // https://www.shadertoy.com/view/4tVSRt
-
-        const float coeff = 0.2;
-        const vec3 totalSkyLight = vec3(1.0, 0.2, 0.0);
-        const vec3 sunL = vec3(1, 0.9, 0.8); // sun color
-
-        vec3 mie(float dist)
-        {
-            return max(exp(-pow(dist, 0.3)) * sunL - 0.4, 0.0);
-        }
-
-
-        vec3 getSky(vec3 dir)
-        {
-            float sunDistance = distance(dir, sunPos) * 2.0;
-
-            float scatterMult = min(sunDistance, 1.0);
-            float sun = 1.0 - smoothstep(0.01, 0.011, scatterMult);
-
-            float dist = max(dir.y + 0.2, 0.001);
-            dist = (coeff * mix(scatterMult, 1.0, dist)) / dist;
-
-            vec3 mieScatter = mie(sunDistance);
-
-            vec3 color = dist * totalSkyLight;
-
-            // color = max(color, 0.0);
-
-            color = max(
-                mix(pow(color, 1.0 - color), color / (2.0 * color + 0.5 - color), clamp(sunPos.y * 2.0, 0.0, 1.0)),
-                0.0
-            ) + sun + mieScatter;
-
-            color *= pow(1.0 - scatterMult, 10.0) * 8.0 + 1.0;
-
-            float underscatter = abs(sunPos.y * 0.5 - 0.5);
-
-            return mix(color, vec3(0.0), min(underscatter, 1.0));
-        }
-
-
-        void main()
-        {
-            fragColor = vec4(getSky(normalize(vDirection)), 1);
-        }
-
-        `;
-
-        skyboxProgram = CreateWebglProgram(gl, vertexShaderSource, fragmentShaderSource, "viewProjectionMatrix", "sunPos");
+        skyboxProgram = CreateWebglProgram(vertexShaderSource, fragmentShaderSource, var_VIEWPROJECTIONMATRIX, var_SUNPOS);
     }
 
     return skyboxProgram;
@@ -2161,10 +2030,10 @@ class Skybox extends Renderable
     private program: WebGLProgram;
     private uniforms: Map<string, WebGLUniformLocation>;
 
-    constructor(gl: WebGL2RenderingContext)
+    constructor()
     {
-        super(gl, CreateBoxGeometry(), 0);
-        const { program, uniformLocations } = GetOrCreateSkyboxProgram(gl);
+        super(CreateBoxGeometry(), 0);
+        const { program, uniformLocations } = GetOrCreateSkyboxProgram();
         this.program = program;
         this.uniforms = uniformLocations;
         this.renderOrder = 1000;
@@ -2177,21 +2046,21 @@ class Skybox extends Renderable
             return;
         }
 
-        this.gl.useProgram(this.program);
-        this.gl.bindVertexArray(this.vao);
+        gl.useProgram(this.program);
+        gl.bindVertexArray(this.vao);
 
-        this.gl.uniformMatrix4fv(this.uniforms.get("viewProjectionMatrix")!, false, viewMatrices.viewProjectionMatrix);
-        this.gl.uniform3fv(this.uniforms.get("sunPos")!, light.transform.position.clone().normalize());
+        gl.uniformMatrix4fv(this.uniforms.get(var_VIEWPROJECTIONMATRIX)!, false, viewMatrices.viewProjectionMatrix);
+        gl.uniform3fv(this.uniforms.get(var_SUNPOS)!, light.transform.position.clone().normalize());
 
-        this.gl.cullFace(this.gl.FRONT);
-        this.gl.depthFunc(this.gl.LEQUAL);
+        gl.cullFace(gl.FRONT);
+        gl.depthFunc(gl.LEQUAL);
 
-        this.gl.drawElements(this.gl.TRIANGLES, this.triangleCount, this.gl.UNSIGNED_INT, 0);
+        gl.drawElements(gl.TRIANGLES, this.triangleCount, gl.UNSIGNED_INT, 0);
 
-        this.gl.cullFace(this.gl.BACK);
-        this.gl.depthFunc(this.gl.LESS);
+        gl.cullFace(gl.BACK);
+        gl.depthFunc(gl.LESS);
 
-        this.gl.bindVertexArray(null);
+        gl.bindVertexArray(null);
     }
 }
 
@@ -2203,11 +2072,6 @@ class Skybox extends Renderable
 abstract class Collider extends SceneNode
 {
     protected matrixInverse = new Matrix4x4(); // world to local
-
-    constructor(gl: WebGL2RenderingContext)
-    {
-        super(gl);
-    }
 
     // recalculates matrix which is
     public updateMatrix()
@@ -2224,9 +2088,9 @@ class BoxCollider extends Collider
 {
     private extents: Vector3;
 
-    constructor(gl: WebGL2RenderingContext, center: Vector3, rotation: Quaternion, size: Vector3)
+    constructor(center: Vector3, rotation: Quaternion, size: Vector3)
     {
-        super(gl);
+        super();
         this.transform.position.copyFrom(center);
         this.transform.rotation.copyFrom(rotation);
         this.updateMatrix();
@@ -2268,9 +2132,9 @@ class SphereCollider extends Collider
 {
     private radius: number;
 
-    constructor(gl: WebGL2RenderingContext, position: Vector3, radius: number)
+    constructor(position: Vector3, radius: number)
     {
-        super(gl);
+        super();
         this.transform.position.copyFrom(position);
         this.updateMatrix();
 
@@ -2284,174 +2148,6 @@ class SphereCollider extends Collider
         return (distance < this.radius + radius) ? worldDirection.safeNormalize().mulScalar(this.radius + radius - distance) : null;
     }
 }
-
-
-
-function NormalMapShader(intensity: number, invert = false)
-{
-    intensity = invert ? -intensity : intensity;
-    return `
-const vec3 off = vec3(-1, 1, 0);
-
-float top = texture(t0, vPixelCoord + pixelSize * off.zy).x;
-float bottom = texture(t0, vPixelCoord + pixelSize * off.zx).x;
-float left = texture(t0, vPixelCoord + pixelSize * off.xz).x;
-float right = texture(t0, vPixelCoord + pixelSize * off.yz).x;
-
-vec3 normal = vec3(float(${intensity}) * (left - right), float(${intensity}) * (bottom - top), pixelSize.y * 100.0);
-outColor = vec4(normalize(normal) * 0.5 + 0.5, 1);
-`;
-}
-
-
-// https://iquilezles.org/www/articles/fbm/fbm.htm
-// https://www.shadertoy.com/view/XdXGW8
-
-const FBM = `
-vec2 grad(ivec2 z)  // replace this anything that returns a random vector
-{
-    // 2D to 1D (feel free to replace by some other)
-    int n = z.x + z.y * 11111;
-
-    // Hugo Elias hash (feel free to replace by another one)
-    n = (n << 13) ^ n;
-    n = (n * (n * n * 15731 + 789221) + 1376312589) >> 16;
-
-    // simple random vectors
-    return vec2(cos(float(n)), sin(float(n)));
-}
-
-float noise(vec2 p)
-{
-    ivec2 i = ivec2(floor(p));
-    vec2 f = fract(p);
-
-    vec2 u = f * f * (3.0 - 2.0 * f); // feel free to replace by a quintic smoothstep instead
-    ivec2 oi = ivec2(0, 1);
-    vec2 of = vec2(oi);
-
-    return mix(mix(dot(grad(i + oi.xx), f - of.xx),
-                   dot(grad(i + oi.yx), f - of.yx), u.x),
-               mix(dot(grad(i + oi.xy), f - of.xy),
-                   dot(grad(i + oi.yy), f - of.yy), u.x), u.y)
-        * 0.5 + 0.5;
-}
-
-float fbm(vec2 p, int numOctaves, float scale, float lacunarity)
-{
-    float t = 0.0;
-    float z = 1.0;
-    for (int i = 0; i < numOctaves; ++i)
-    {
-        z *= 0.5;
-        t += z * noise(p * scale);
-        p = p * lacunarity;
-    }
-
-    return t / (1.0 - z);
-}
-`;
-
-
-
-interface TextureCollection
-{
-    albedo: WebGLTexture;
-    normalMap: WebGLTexture;
-    roughness: WebGLTexture;
-}
-
-// x - cell color, y - distance to cell
-const VoronoiGrayscale = `
-vec2 voronoi(vec2 x, float w)
-{
-    vec2 n = floor(x);
-    vec2 f = fract(x);
-
-    vec2 m = vec2(0.0, 8.0);
-    for (int j = -2; j <= 2; ++j)
-    for (int i = -2; i <= 2; ++i)
-    {
-        vec2 g = vec2(i, j);
-        vec2 o = hash2(n + g);
-
-        // distance to cell
-        float d = length(g - f + o);
-
-        // cell color
-        float col = 0.5 + 0.5 * sin(hash1(dot(n + g, vec2(7.0, 113.0))) * 2.5 + 5.0);
-
-        // do the smooth min for colors and distances
-        float h = smoothstep(0.0, 1.0, 0.5 + 0.5 * (m.y - d) / w);
-        m.y = mix(m.y, d, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // distance
-        m.x = mix(m.x, col, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // color
-    }
-
-    return m;
-}
-`;
-
-
-const ShaderUtils = `
-float hash1(float n)
-{
-    return fract(sin(n) * 43758.5453);
-}
-
-vec2 hash2(vec2 p)
-{
-    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return fract(sin(p)*43758.5453);
-}
-
-float saturate(float x)
-{
-    return clamp(x, 0.0, 1.0);
-}
-
-float unlerp(float a, float b, float x)
-{
-    return (x - a) / (b - a);
-}
-
-float remap(float from0, float from1, float to0, float to1, float x)
-{
-    return mix(to0, to1, unlerp(from0, from1, x));
-}
-
-float sharpstep(float edge0, float edge1, float x)
-{
-    return saturate(unlerp(edge0, edge1, x));
-}
-
-vec4 colorRamp2(vec4 colorA, float posA, vec4 colorB, float posB, float t)
-{
-    return mix(colorA, colorB, sharpstep(posA, posB, t));
-}
-
-float valueRamp2(float colorA, float posA, float colorB, float posB, float t)
-{
-    return mix(colorA, colorB, sharpstep(posA, posB, t));
-}
-
-`;
-
-const edgeBlend = (fnName: string, blend = 0.2) => `
-vec4 edgeBlend(vec2 uv)
-{
-    const vec2 fadeWidth = vec2(${blend});
-    const vec2 scaling = 1.0 - fadeWidth;
-    vec2 offsetuv = uv * scaling;
-    vec2 blend = clamp((uv - scaling) / fadeWidth, 0.0, 1.0);
-
-    return
-        blend.y * blend.x * ${fnName}(fract(offsetuv + (fadeWidth * 2.0))) +
-        blend.y * (1.0 - blend.x) * ${fnName}(vec2(fract(offsetuv.x + fadeWidth.x), fract(offsetuv.y + (fadeWidth.y * 2.0)))) +
-        (1.0 - blend.y) * (1.0 - blend.x) * ${fnName}(fract(offsetuv + fadeWidth)) +
-        (1.0 - blend.y) * blend.x * ${fnName}(vec2(fract(offsetuv.x + (fadeWidth.x * 2.0)), fract(offsetuv.y + fadeWidth.y)));
-}
-
-`;
 
 
 
@@ -2511,14 +2207,14 @@ class Mesh extends Renderable
     private textures = new Map<number, WebGLTexture>();
     public castShadows = true;
 
-    constructor(gl: WebGL2RenderingContext, geometry: Geometry, material: Material)
+    constructor(geometry: Geometry, material: Material)
     {
         const positionLoc = 0;  // from shader
         const normalLoc = 1;    // same
 
-        super(gl, geometry, positionLoc, normalLoc);
+        super(geometry, positionLoc, normalLoc);
 
-        const { program, uniformLocations } = GetOrCreateStandardMaterial(gl);
+        const { program, uniformLocations } = GetOrCreateStandardMaterial();
         this.program = program;
         this.uniforms = uniformLocations;
 
@@ -2527,52 +2223,52 @@ class Mesh extends Renderable
         this.material = { ...material };
 
         // shadows
-        this.shadowProgram = GetOrCreateShadowProgram(gl).program;
+        this.shadowProgram = GetOrCreateShadowProgram().program;
     }
 
     private prepareMaterial()
     {
-        this.gl.uniform1i(this.uniforms.get("albedo")!, 0);
-        this.gl.uniform1i(this.uniforms.get("normalMap")!, 1);
-        this.gl.uniform1i(this.uniforms.get("roughnessMap")!, 2);
+        gl.uniform1i(this.uniforms.get(var_ALBEDO)!, 0);
+        gl.uniform1i(this.uniforms.get(var_NORMALMAP)!, 1);
+        gl.uniform1i(this.uniforms.get(var_ROUGHNESSMAP)!, 2);
 
-        this.gl.uniform1i(this.uniforms.get("hasAlbedo")!, 0);
-        this.gl.uniform1i(this.uniforms.get("hasNormalMap")!, 0);
-        this.gl.uniform1i(this.uniforms.get("hasRoughnessMap")!, 0);
+        gl.uniform1i(this.uniforms.get(var_HASALBEDO)!, 0);
+        gl.uniform1i(this.uniforms.get(var_HASNORMALMAP)!, 0);
+        gl.uniform1i(this.uniforms.get(var_HASROUGHNESSMAP)!, 0);
 
-        this.gl.uniform1f(this.uniforms.get("sharpness")!, 1);
-        this.gl.uniform3f(this.uniforms.get("scale")!, 1, 1, 1);
-        this.gl.uniform3f(this.uniforms.get("offset")!, 0, 0, 0);
-        this.gl.uniform1f(this.uniforms.get("lightIntensity")!, 0.5);
+        gl.uniform1f(this.uniforms.get(var_SHARPNESS)!, 1);
+        gl.uniform3f(this.uniforms.get(var_SCALE)!, 1, 1, 1);
+        gl.uniform3f(this.uniforms.get(var_OFFSET)!, 0, 0, 0);
+        gl.uniform1f(this.uniforms.get(var_LIGHTINTENSITY)!, 0.5);
 
         for (let i = 0; i < 8; ++i)
         {
-            this.gl.activeTexture(this.gl.TEXTURE0 + i);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+            gl.activeTexture(gl.TEXTURE0 + i);
+            gl.bindTexture(gl.TEXTURE_2D, null);
         }
 
         const { material } = this;
         if (material)
         {
-            this.gl.uniform4f(this.uniforms.get("baseColor")!, material.r, material.g, material.b, material.a);
-            this.gl.uniform1f(this.uniforms.get("metallic")!, material.metallic ?? 0);
+            gl.uniform4f(this.uniforms.get(var_BASECOLOR)!, material.r, material.g, material.b, material.a);
+            gl.uniform1f(this.uniforms.get(var_METALLIC)!, material.metallic ?? 0);
 
             const coeff = 0.2;
             const eps = 1e-5;
             const roughness = 1.0 + coeff - coeff / Clamp(material.roughness ?? 0.5, eps, 1.0 - eps);
 
-            this.gl.uniform1f(this.uniforms.get("roughness")!, roughness);
+            gl.uniform1f(this.uniforms.get(var_ROUGHNESS)!, roughness);
 
-            this.gl.uniform1f(this.uniforms.get("sharpness")!, material.textureBlendSharpness ?? 1);
-            material.textureScale && this.gl.uniform3fv(this.uniforms.get("scale")!, material.textureScale);
-            material.textureOffset && this.gl.uniform3fv(this.uniforms.get("offset")!, material.textureOffset);
+            gl.uniform1f(this.uniforms.get(var_SHARPNESS)!, material.textureBlendSharpness ?? 1);
+            material.textureScale && gl.uniform3fv(this.uniforms.get(var_SCALE)!, material.textureScale);
+            material.textureOffset && gl.uniform3fv(this.uniforms.get(var_OFFSET)!, material.textureOffset);
 
             for (const data of this.textures)
             {
                 const [slot, tex] = data;
-                this.gl.activeTexture(this.gl.TEXTURE0 + slot);
-                this.gl.bindTexture(this.gl.TEXTURE_2D, tex);
-                this.gl.uniform1i(this.uniforms.get(["hasAlbedo", "hasNormalMap", "hasRoughnessMap"][slot])!, tex ? 1 : 0);
+                gl.activeTexture(gl.TEXTURE0 + slot);
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.uniform1i(this.uniforms.get([var_HASALBEDO, var_HASNORMALMAP, var_HASROUGHNESSMAP][slot])!, tex ? 1 : 0);
             }
         }
     }
@@ -2598,8 +2294,8 @@ class Mesh extends Renderable
 
         const { viewMatrix, viewProjectionMatrix } = viewMatrices;
 
-        this.gl.useProgram(mode === RenderMode.Normal ? this.program : this.shadowProgram);
-        this.gl.bindVertexArray(this.vao);
+        gl.useProgram(mode === RenderMode.Normal ? this.program : this.shadowProgram);
+        gl.bindVertexArray(this.vao);
 
         if (mode === RenderMode.Normal)
         {
@@ -2608,44 +2304,44 @@ class Mesh extends Renderable
             const worldViewNormalMatrix = worldViewMatrix.topLeft3x3().invert() /* .transpose() */;
             const worldNormalMatrix = worldMatrix.topLeft3x3().invert() /* .transpose() */;
 
-            this.gl.uniformMatrix4fv(this.uniforms.get("worldViewMat")!, false, worldViewMatrix);
-            this.gl.uniformMatrix4fv(this.uniforms.get("worldViewProjMat")!, false, worldViewProjectionMatrix);
-            this.gl.uniformMatrix3fv(this.uniforms.get("worldViewNormalMat")!, true, worldViewNormalMatrix);
-            this.gl.uniformMatrix4fv(this.uniforms.get("worldMat")!, false, worldMatrix);
-            this.gl.uniformMatrix3fv(this.uniforms.get("worldNormalMat")!, true, worldNormalMatrix);
-            this.gl.uniform3fv(this.uniforms.get("lightPos")!,
+            gl.uniformMatrix4fv(this.uniforms.get(var_WORLDVIEWMAT)!, false, worldViewMatrix);
+            gl.uniformMatrix4fv(this.uniforms.get(var_WORLDVIEWPROJMAT)!, false, worldViewProjectionMatrix);
+            gl.uniformMatrix3fv(this.uniforms.get(var_WORLDVIEWNORMALMAT)!, true, worldViewNormalMatrix);
+            gl.uniformMatrix4fv(this.uniforms.get(var_WORLDMAT)!, false, worldMatrix);
+            gl.uniformMatrix3fv(this.uniforms.get(var_WORLDNORMALMAT)!, true, worldNormalMatrix);
+            gl.uniform3fv(this.uniforms.get(var_LIGHTPOS)!,
                 light.transform.position.clone()
                     .add(viewMatrices.cameraPosition)
                     .applyMatrix4x4(light.transform.matrix().preMultiply(viewMatrix))
                     .normalize()
             );
-            this.gl.uniform3fv(this.uniforms.get("lightPosWorld")!, light.transform.position.clone().normalize());
+            gl.uniform3fv(this.uniforms.get(var_LIGHTPOSWORLD)!, light.transform.position.clone().normalize());
 
             this.prepareMaterial();
 
-            this.gl.activeTexture(this.gl.TEXTURE3);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, light.depthTexture);
+            gl.activeTexture(gl.TEXTURE3);
+            gl.bindTexture(gl.TEXTURE_2D, light.depthTexture);
 
-            this.gl.uniformMatrix4fv(this.uniforms.get("shadowMVP")!, false, light.depthMVP);
-            this.gl.uniform3fv(this.uniforms.get("playerPosition")!, viewMatrices.playerPosition);
+            gl.uniformMatrix4fv(this.uniforms.get(var_SHADOWMVP)!, false, light.depthMVP);
+            gl.uniform3fv(this.uniforms.get(var_PLAYERPOSITION)!, viewMatrices.playerPosition);
         }
         else
         {
-            this.gl.activeTexture(this.gl.TEXTURE0);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, null);
-            this.gl.uniformMatrix4fv(light.worldMatLocation, false, worldMatrix);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.uniformMatrix4fv(light.worldMatLocation, false, worldMatrix);
         }
 
-        this.gl.drawElements(this.gl.TRIANGLES, this.triangleCount, this.gl.UNSIGNED_INT, 0);
+        gl.drawElements(gl.TRIANGLES, this.triangleCount, gl.UNSIGNED_INT, 0);
 
-        this.gl.bindVertexArray(null);
+        gl.bindVertexArray(null);
     }
 }
 
 
 
 let spriteProgram: ReturnType<typeof CreateWebglProgram> | null = null;
-function GetOrCreateSpriteProgram(gl: WebGL2RenderingContext)
+function GetOrCreateSpriteProgram()
 {
     if (spriteProgram === null)
     {
@@ -2685,7 +2381,7 @@ function GetOrCreateSpriteProgram(gl: WebGL2RenderingContext)
 
         `;
 
-        spriteProgram = CreateWebglProgram(gl, vertexShaderSource, fragmentShaderSource, "viewProjectionMatrix", "worldMat", "tex");
+        spriteProgram = CreateWebglProgram(vertexShaderSource, fragmentShaderSource, "viewProjectionMatrix", "worldMat", "tex");
     }
 
     return spriteProgram;
@@ -2698,16 +2394,16 @@ class Sprite extends Renderable
     private texture: WebGLTexture | null;
     private shadowProgram: ReturnType<typeof GetOrCreateShadowProgram>;
 
-    constructor(gl: WebGL2RenderingContext, texture: WebGLTexture | null)
+    constructor(texture: WebGLTexture | null)
     {
-        super(gl, CreateBoxGeometry(1, 1, 0.01), 0);
-        const { program, uniformLocations } = GetOrCreateSpriteProgram(gl);
+        super(CreateBoxGeometry(1, 1, 0.01), 0);
+        const { program, uniformLocations } = GetOrCreateSpriteProgram();
         this.program = program;
         this.uniforms = uniformLocations;
         this.texture = texture;
         this.renderOrder = 2000;
 
-        this.shadowProgram = GetOrCreateShadowProgram(gl);
+        this.shadowProgram = GetOrCreateShadowProgram();
     }
 
     public setTexture(texture: WebGLTexture | null)
@@ -2717,41 +2413,40 @@ class Sprite extends Renderable
 
     public render(mode: RenderMode, viewMatrices: ViewMatrices, worldMatrix: Matrix4x4, light: DirectionalLight): void
     {
-        this.gl.useProgram(mode === RenderMode.Normal ? this.program : this.shadowProgram.program);
-        this.gl.bindVertexArray(this.vao);
+        gl.useProgram(mode === RenderMode.Normal ? this.program : this.shadowProgram.program);
+        gl.bindVertexArray(this.vao);
 
-        this.gl.enable(this.gl.BLEND);
-        this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
         if (this.texture)
         {
-            this.gl.activeTexture(this.gl.TEXTURE0);
-            this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.texture);
         }
 
         if (mode === RenderMode.Normal)
         {
-            this.gl.uniform1i(this.uniforms.get("tex")!, 0);
-            this.gl.uniformMatrix4fv(this.uniforms.get("viewProjectionMatrix")!, false, viewMatrices.viewProjectionMatrix);
-            this.gl.uniformMatrix4fv(this.uniforms.get("worldMat")!, false, worldMatrix);
+            gl.uniform1i(this.uniforms.get("tex")!, 0);
+            gl.uniformMatrix4fv(this.uniforms.get("viewProjectionMatrix")!, false, viewMatrices.viewProjectionMatrix);
+            gl.uniformMatrix4fv(this.uniforms.get("worldMat")!, false, worldMatrix);
         }
         else
         {
-            this.gl.uniform1i(this.shadowProgram.uniformLocations.get("tex")!, 0);
-            this.gl.uniformMatrix4fv(light.worldMatLocation, false, worldMatrix);
+            gl.uniform1i(this.shadowProgram.uniformLocations.get("tex")!, 0);
+            gl.uniformMatrix4fv(light.worldMatLocation, false, worldMatrix);
         }
 
-        this.gl.drawElements(this.gl.TRIANGLES, this.triangleCount, this.gl.UNSIGNED_INT, 0);
+        gl.drawElements(gl.TRIANGLES, this.triangleCount, gl.UNSIGNED_INT, 0);
 
-        this.gl.bindVertexArray(null);
-        this.gl.disable(this.gl.BLEND);
+        gl.bindVertexArray(null);
+        gl.disable(gl.BLEND);
     }
 }
 
 
 
-function CreateSawBlade(size: number, gl: WebGL2RenderingContext,
-    albedo: WebGLTexture | null, normalMap: WebGLTexture | null, roughnessMap: WebGLTexture | null)
+function CreateSawBlade(size: number)
 {
     const material: Material = {
         r: 1,
@@ -2817,16 +2512,13 @@ function CreateSawBlade(size: number, gl: WebGL2RenderingContext,
         toothGeometries.push(tooth);
     }
 
-    const discObject = new Mesh(gl, JoinGeometries(discGeometry, ...toothGeometries), material);
-    discObject.setTexture(0, albedo);
-    discObject.setTexture(1, normalMap);
-    discObject.setTexture(2, roughnessMap);
+    const discObject = new Mesh(JoinGeometries(discGeometry, ...toothGeometries), material);
 
     return discObject;
 }
 
 
-function CreateSpikeObject(countX: number, countY: number, gl: WebGL2RenderingContext,
+function CreateSpikeObject(countX: number, countY: number,
     albedo: WebGLTexture | null, normalMap: WebGLTexture | null, roughnessMap: WebGLTexture | null): Mesh
 {
     const material: Material = {
@@ -2892,7 +2584,7 @@ function CreateSpikeObject(countX: number, countY: number, gl: WebGL2RenderingCo
         }
     }
 
-    const mesh = new Mesh(gl, JoinGeometries(...geometries), material);
+    const mesh = new Mesh(JoinGeometries(...geometries), material);
     mesh.setTexture(0, albedo);
     mesh.setTexture(1, normalMap);
     mesh.setTexture(2, roughnessMap);
@@ -2902,116 +2594,16 @@ function CreateSpikeObject(countX: number, countY: number, gl: WebGL2RenderingCo
 
 
 let lavaProgram: ReturnType<typeof CreateWebglProgram> | null = null;
-function GetOrCreateLavaProgram(gl: WebGL2RenderingContext)
+function GetOrCreateLavaProgram()
 {
     if (lavaProgram === null)
     {
-        const vertexShaderSource = `#version 300 es
+        const vertexShaderSource = lava_vs;
 
-        layout (location = 0)
-        in vec4 aVertexPosition;
+        const fragmentShaderSource = lava_fs;
 
-        out vec2 vertexPosition;
-        out vec4 shadowPos;
-
-        uniform mat4 viewProjectionMatrix;
-        uniform mat4 worldMat;
-        uniform mat4 shadowMVP;
-
-        void main()
-        {
-            vertexPosition = aVertexPosition.xy;
-            vertexPosition.y += aVertexPosition.z;
-            shadowPos = shadowMVP * worldMat * aVertexPosition * 0.5 + 0.5;
-            gl_Position = viewProjectionMatrix * worldMat * aVertexPosition;
-        }
-
-        `;
-
-        const fragmentShaderSource = `#version 300 es
-
-        precision highp float;
-        precision highp sampler2DShadow;
-
-        uniform float uTime;
-        uniform sampler2DShadow depthMap;
-        uniform bool hueShift;
-
-        in vec2 vertexPosition;
-        in vec4 shadowPos;
-
-        out vec4 fragColor;
-
-        ${ShaderUtils}
-
-        ${FBM}
-
-        // lava shader from https://www.shadertoy.com/view/4lXfR7
-
-        vec3 magmaFunc(vec3 color, vec2 uv, float detail, float power, float colorMul, float glowRate, float noiseAmount)
-        {
-            vec3 rockColor = vec3(0.1 + abs(sin(uTime)) * 0.03, 0.02, 0.02);
-            uv *= detail;
-            float minDistance = 1.0;
-
-            vec2 cell = floor(uv);
-            vec2 frac = fract(uv);
-            float noiseOffset = noise(uv) * noiseAmount;
-
-            for (int i = -1; i <= 1; ++i)
-            {
-                for (int j = -1; j <= 1; ++j)
-                {
-                    vec2 cellDir = vec2(i, j);
-                    vec2 randPoint = hash2(cell + cellDir) + noiseOffset;
-                    randPoint = 0.5 + 0.5 * sin(uTime * 0.35 + 6.2831 * randPoint);
-                    minDistance = min(minDistance, length(cellDir + randPoint - frac));
-                }
-            }
-
-            float powAdd = noise(uv * 0.1 + uTime * 0.2 * glowRate) - 0.8;
-            powAdd *= 6.0;
-            vec3 outColor = vec3(color * pow(minDistance, power + powAdd * 0.95) * colorMul);
-            outColor = mix(rockColor, outColor, minDistance);
-            return outColor;
-        }
-
-        void main()
-        {
-            vec2 uv = vertexPosition * 0.1;
-            fragColor = vec4(0, 0, 0, 1);
-            fragColor.rgb += magmaFunc(vec3(1.5, 0.4, 0), uv, 3.0, 2.5, 1.15, 0.5, 0.5);
-            fragColor.rgb += magmaFunc(vec3(1.5, 0, 0),   uv, 6.0, 3.0, 0.4,  0.3, 0.0);
-            fragColor.rgb += magmaFunc(vec3(1.2, 0.4, 0), uv, 8.0, 4.0, 0.2,  0.6, 0.5);
-
-            if (hueShift)
-            {
-                fragColor = fragColor.grbr;
-            }
-            else
-            {
-                float shadowLightValue = 0.0;
-                vec3 shadowPosLightSpace = shadowPos.xyz / shadowPos.w;
-                vec2 uvDistanceFromCenter = abs(vec2(0.5) - shadowPosLightSpace.xy);
-
-                if (shadowPosLightSpace.z > 1.0 || uvDistanceFromCenter.x > 0.5 || uvDistanceFromCenter.y > 0.5)
-                {
-                    // if the coordinate is outside the shadowmap, then it's in light
-                    shadowLightValue = 1.0;
-                }
-                else
-                {
-                    shadowLightValue = texture(depthMap, shadowPosLightSpace) * 0.5 + 0.5;
-                }
-
-                fragColor.rgb = min(fragColor.rgb, vec3(1)) * shadowLightValue;
-            }
-        }
-
-        `;
-
-        lavaProgram = CreateWebglProgram(gl, vertexShaderSource, fragmentShaderSource,
-            "viewProjectionMatrix", "worldMat", "uTime", "shadowMVP", "depthMap", "hueShift"
+        lavaProgram = CreateWebglProgram(vertexShaderSource, fragmentShaderSource,
+            var_VIEWPROJECTIONMATRIX, var_WORLDMAT, var_UTIME, var_SHADOWMVP, var_DEPTHMAP, var_HUESHIFT
         );
     }
 
@@ -3024,10 +2616,10 @@ class Lava extends Renderable
     private uniforms: Map<string, WebGLUniformLocation>;
     public hueShift = 0;
 
-    constructor(gl: WebGL2RenderingContext, geometry: Geometry)
+    constructor(geometry: Geometry)
     {
-        super(gl, geometry, 0);
-        const { program, uniformLocations } = GetOrCreateLavaProgram(gl);
+        super(geometry, 0);
+        const { program, uniformLocations } = GetOrCreateLavaProgram();
         this.program = program;
         this.uniforms = uniformLocations;
         this.renderOrder = 500;
@@ -3040,26 +2632,26 @@ class Lava extends Renderable
             return;
         }
 
-        this.gl.useProgram(this.program);
-        this.gl.bindVertexArray(this.vao);
+        gl.useProgram(this.program);
+        gl.bindVertexArray(this.vao);
 
-        this.gl.uniformMatrix4fv(this.uniforms.get("viewProjectionMatrix")!, false, viewMatrices.viewProjectionMatrix);
-        this.gl.uniformMatrix4fv(this.uniforms.get("worldMat")!, false, worldMatrix);
-        this.gl.uniform1f(this.uniforms.get("uTime")!, performance.now() / 1000);
-        this.gl.uniform1i(this.uniforms.get("depthMap")!, 0);
+        gl.uniformMatrix4fv(this.uniforms.get(var_VIEWPROJECTIONMATRIX)!, false, viewMatrices.viewProjectionMatrix);
+        gl.uniformMatrix4fv(this.uniforms.get(var_WORLDMAT)!, false, worldMatrix);
+        gl.uniform1f(this.uniforms.get(var_UTIME)!, performance.now() / 1000);
+        gl.uniform1i(this.uniforms.get(var_DEPTHMAP)!, 0);
 
-        this.gl.activeTexture(this.gl.TEXTURE0);
-        this.gl.bindTexture(this.gl.TEXTURE_2D, light.depthTexture);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, light.depthTexture);
 
-        this.gl.uniformMatrix4fv(this.uniforms.get("shadowMVP")!, false, light.depthMVP);
-        this.gl.uniform1i(this.uniforms.get("hueShift")!, this.hueShift);
+        gl.uniformMatrix4fv(this.uniforms.get(var_SHADOWMVP)!, false, light.depthMVP);
+        gl.uniform1i(this.uniforms.get(var_HUESHIFT)!, this.hueShift);
 
-        this.hueShift && (this.gl.enable(this.gl.BLEND), this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA));
+        this.hueShift && (gl.enable(gl.BLEND), gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA));
 
-        this.gl.drawElements(this.gl.TRIANGLES, this.triangleCount, this.gl.UNSIGNED_INT, 0);
+        gl.drawElements(gl.TRIANGLES, this.triangleCount, gl.UNSIGNED_INT, 0);
 
-        this.gl.bindVertexArray(null);
-        this.hueShift && this.gl.disable(this.gl.BLEND);
+        gl.bindVertexArray(null);
+        this.hueShift && gl.disable(gl.BLEND);
     }
 }
 
@@ -3068,7 +2660,7 @@ class Lava extends Renderable
 const drawCanvas = document.createElement("canvas");
 const drawCtx = drawCanvas.getContext("2d")!;
 
-function DrawImageToCanvas(gl: WebGL2RenderingContext, w: number, h: number, drawFn: () => void)
+function DrawImageToCanvas(w: number, h: number, drawFn: () => void)
 {
     drawCanvas.width = w;
     drawCanvas.height = h;
@@ -3088,20 +2680,14 @@ function DrawImageToCanvas(gl: WebGL2RenderingContext, w: number, h: number, dra
     return tex;
 }
 
-async function ImageToWebglTexture(gl: WebGL2RenderingContext, w: number, h: number, imgSrc: string)
+async function ImageToWebglTexture(w: number, h: number, imgSrc: string)
 {
     return await new Promise<WebGLTexture>(resolve =>
     {
         const img = new Image();
-        img.onload = () => resolve(DrawImageToCanvas(gl, w, h, () => drawCtx.drawImage(img, 0, 0, w, h)));
+        img.onload = () => resolve(DrawImageToCanvas(w, h, () => drawCtx.drawImage(img, 0, 0, w, h)));
         img.src = imgSrc;
     });
-}
-
-function CanvasDrawingToWebglTexture(gl: WebGL2RenderingContext, w: number, h: number,
-    fn: (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) => void)
-{
-    return DrawImageToCanvas(gl, w, h, () => fn(drawCanvas, drawCtx));
 }
 
 
@@ -3113,16 +2699,9 @@ document.getElementById("main")!.innerHTML = htmlMinified;
 
 
 
-const canvas = document.createElement("canvas");
+const scene = new Scene();
 
-canvas.style.position = "absolute";
-canvas.style.top = "0px";
-canvas.style.left = "0px";
-
-const gl = canvas.getContext("webgl2")!;
-const scene = new Scene(gl);
-
-scene.add(new Skybox(gl));
+scene.add(new Skybox());
 
 const up = new Vector3(0, 1, 0);
 
@@ -3137,8 +2716,8 @@ class CollidableBox extends BoxCollider
 
     constructor(size: Vector3, material: Material)
     {
-        super(gl, new Vector3(), new Quaternion(), size);
-        this.mesh = new Mesh(gl, CreateBoxGeometry(...size), material);
+        super(new Vector3(), new Quaternion(), size);
+        this.mesh = new Mesh(CreateBoxGeometry(...size), material);
         this.add(this.mesh);
     }
 }
@@ -3149,8 +2728,8 @@ class CollidableSphere extends SphereCollider
 
     constructor(radius: number, material: Material)
     {
-        super(gl, new Vector3(), radius);
-        this.mesh = new Mesh(gl, CreateSphereGeometry(radius, 24 * 3, 16 * 3), material);
+        super(new Vector3(), radius);
+        this.mesh = new Mesh(CreateSphereGeometry(radius, 24 * 3, 16 * 3), material);
         this.add(this.mesh);
     }
 }
@@ -3252,7 +2831,7 @@ function CreateSawBladeLevelObject(sawSize: number = 3, px: number, py: number, 
     const sawCollider = new CollidableBox(new Vector3(sawSize, sawSize, 0.2), solidMaterial);
     sawCollider.mesh.visible = false;
 
-    const saw = CreateSawBlade(sawSize * 0.68, gl, null, null, null);
+    const saw = CreateSawBlade(sawSize * 0.68);
 
     sawCollider.add(saw);
     sawCollider.transform.position.setValues(px, py, pz);
@@ -3274,7 +2853,7 @@ function CreateSpikesLevelObject(countX: number, countY: number, px: number, py:
     const collider = new CollidableBox(new Vector3(0.4 * countX, 1.2, 0.4 * countY), solidMaterial);
     collider.mesh.visible = false;
 
-    const spikeMesh = CreateSpikeObject(countX, countY, gl, null, null, null);
+    const spikeMesh = CreateSpikeObject(countX, countY, null, null, null);
     collider.add(spikeMesh);
     collider.transform.position.setValues(px, py, pz);
 
@@ -3312,9 +2891,9 @@ function CreateTrampolineLevelObject(sx: number, sy: number, sz: number, px: num
 
 function CreatePowerup(px: number, py: number, pz: number, spriteImage: WebGLTexture, onPickup: () => void): LevelObject
 {
-    const collider = new SphereCollider(gl, new Vector3(px, py, pz), 0.8);
+    const collider = new SphereCollider(new Vector3(px, py, pz), 0.8);
     collider.renderOrder = 2000;
-    const sprite = new Sprite(gl, spriteImage);
+    const sprite = new Sprite(spriteImage);
     collider.add(sprite);
 
     triggers.push(new Trigger(collider, trigger => { trigger.setEnabled(false); onPickup(); }));
@@ -3339,18 +2918,18 @@ function CreateFinishObject(px: number, py: number, pz: number, angle: number)
     const finishMaterial: Material = { r: 0.5, g: 0.3, b: 0.3, a: 1 };
 
     const borderThickness = 0.3;
-    const leftSide = new Mesh(gl, CreateBoxGeometry(borderThickness, finishHeight, borderThickness), finishMaterial);
-    const rightSide = new Mesh(gl, CreateBoxGeometry(borderThickness, finishHeight, borderThickness), finishMaterial);
-    const top = new Mesh(gl, CreateBoxGeometry(finishWidth - borderThickness, borderThickness, borderThickness), finishMaterial);
+    const leftSide = new Mesh(CreateBoxGeometry(borderThickness, finishHeight, borderThickness), finishMaterial);
+    const rightSide = new Mesh(CreateBoxGeometry(borderThickness, finishHeight, borderThickness), finishMaterial);
+    const top = new Mesh(CreateBoxGeometry(finishWidth - borderThickness, borderThickness, borderThickness), finishMaterial);
 
     leftSide.transform.position.setValues(-finishWidth / 2, 0, 0);
     rightSide.transform.position.setValues(finishWidth / 2, 0, 0);
     top.transform.position.y = finishHeight / 2 - borderThickness / 2;
 
-    const collider = new BoxCollider(gl, new Vector3(px, py + finishHeight / 2, pz), new Quaternion().setFromAxisAngle(0, 1, 0, angle), new Vector3(finishWidth, finishHeight, 0.01));
+    const collider = new BoxCollider(new Vector3(px, py + finishHeight / 2, pz), new Quaternion().setFromAxisAngle(0, 1, 0, angle), new Vector3(finishWidth, finishHeight, 0.01));
     collider.renderOrder = 2000;
 
-    const portal = new Lava(gl, CreateBoxGeometry(finishWidth, finishHeight - borderThickness / 2, 0.01));
+    const portal = new Lava(CreateBoxGeometry(finishWidth, finishHeight - borderThickness / 2, 0.01));
     portal.hueShift = 1;
     portal.transform.position.y = -borderThickness / 2;
     collider.add(portal);
@@ -3400,8 +2979,8 @@ function DestroyLevel()
 const arrowUpSvg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24px' height='24px' viewBox='0 0 24 24' stroke-width='1' stroke='red' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M8 13l4 4m4-4l-4 4M8 8l4 4m4-4l-4 4' stroke='%230f0'/%3E%3C/svg%3E";
 const lightningSvg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24px' height='24px' viewBox='0 0 24 24' stroke-width='1' stroke='red' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath fill='%230f0' d='M16 18h-5l-2-6h2L9 6l6 7h-2z'/%3E%3C/svg%3E";
 
-const lightningTexture = await ImageToWebglTexture(gl, 256, 256, lightningSvg);
-const arrowUpTexture = await ImageToWebglTexture(gl, 256, 256, arrowUpSvg);
+const lightningTexture = await ImageToWebglTexture(256, 256, lightningSvg);
+const arrowUpTexture = await ImageToWebglTexture(256, 256, arrowUpSvg);
 
 const playerStartingPosition = new Vector3();
 let playerStartingRotation = 0;
@@ -3819,8 +3398,8 @@ function Level2()
         tiltingBlockMaterial
     );
 
-    const side1 = new Mesh(gl, CreateBoxGeometry(8.01, 1.01, 0.3), { r: 0, g: 1, b: 0, a: 1 });
-    const side2 = new Mesh(gl, CreateBoxGeometry(8.01, 1.01, 0.3), { r: 0, g: 1, b: 0, a: 1 });
+    const side1 = new Mesh(CreateBoxGeometry(8.01, 1.01, 0.3), { r: 0, g: 1, b: 0, a: 1 });
+    const side2 = new Mesh(CreateBoxGeometry(8.01, 1.01, 0.3), { r: 0, g: 1, b: 0, a: 1 });
     block.object.add(side1);
     block.object.add(side2);
     side1.transform.position.z = -2.01 + 0.3 / 2;
@@ -4491,7 +4070,7 @@ const levels: (() => void)[] = [
 
 let currentLevel = 0;
 
-const lava = new Lava(gl, CreateBoxGeometry(1000, 1, 1000));
+const lava = new Lava(CreateBoxGeometry(1000, 1, 1000));
 lava.transform.position.y = -1;
 scene.add(lava);
 
@@ -4503,12 +4082,12 @@ function CheckLava()
     }
 }
 
-const player = new Mesh(gl, { vertices: new Float32Array(), triangles: new Uint32Array(), normals: new Float32Array() }, solidMaterial);
+const player = new Mesh({ vertices: new Float32Array(), triangles: new Uint32Array(), normals: new Float32Array() }, solidMaterial);
 scene.add(player);
 
 const playerRadius = 0.4;
 
-const camera = new Camera(gl);
+const camera = new Camera();
 camera.transform.position.y = 1.5;
 // camera.transform.position.z = 0.05; // pull back the camera a bit
 player.add(camera);
