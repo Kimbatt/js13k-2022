@@ -1,0 +1,1 @@
+google-closure-compiler --compilation_level ADVANCED --language_in UNSTABLE --js_output_file closure-compiled.js --js main.js
