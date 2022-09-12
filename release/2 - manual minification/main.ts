@@ -9,20 +9,14 @@ canvas.style.top = "0px";
 canvas.style.left = "0px";
 
 const gl = canvas.getContext("webgl2")!;
+const ext = gl.getExtension("EXT_texture_filter_anisotropic");
 
 function NormalMapShader(intensity: number, invert = false)
 {
     intensity = invert ? -intensity : intensity;
     return `
-const vec3 off = vec3(-1, 1, 0);
-
-float top = texture(t0, vPixelCoord + pixelSize * off.zy).x;
-float bottom = texture(t0, vPixelCoord + pixelSize * off.zx).x;
-float left = texture(t0, vPixelCoord + pixelSize * off.xz).x;
-float right = texture(t0, vPixelCoord + pixelSize * off.yz).x;
-
-vec3 normal = vec3(float(${intensity}) * (left - right), float(${intensity}) * (bottom - top), pixelSize.y * 100.0);
-outColor = vec4(normalize(normal) * 0.5 + 0.5, 1);
+vec3 o=vec3(-1,1,0);
+outColor=vec4(normalize(vec3(float(${intensity})*(texture(t0,vPixelCoord+ps*o.xz).x-texture(t0,vPixelCoord+ps*o.yz).x),float(${intensity})*(texture(t0,vPixelCoord+ps*o.zx).x-texture(t0,vPixelCoord+ps*o.zy).x),ps.y*100.))*.5+.5,1);
 `;
 }
 
@@ -33,36 +27,33 @@ outColor = vec4(normalize(normal) * 0.5 + 0.5, 1);
 const FBM = `
 vec2 grad(ivec2 z)
 {
-int n = z.x + z.y * 11111;
-n = (n << 13) ^ n;
-n = (n * (n * n * 15731 + 789221) + 1376312589) >> 16;
-return vec2(cos(float(n)), sin(float(n)));
+int n=z.x+z.y*11111;
+n=(n<<13)^n;
+n=(n*(n*n*15731+789221)+1376312589)>>16;
+return vec2(cos(float(n)),sin(float(n)));
 }
-
 float noise(vec2 p)
 {
-ivec2 i = ivec2(floor(p));
-vec2 f = fract(p);
-vec2 u = f * f * (3.0 - 2.0 * f);
-ivec2 oi = ivec2(0, 1);
-vec2 of = vec2(oi);
-return mix(mix(dot(grad(i + oi.xx), f - of.xx),
-dot(grad(i + oi.yx), f - of.yx), u.x),
-mix(dot(grad(i + oi.xy), f - of.xy),
-dot(grad(i + oi.yy), f - of.yy), u.x), u.y)
-* 0.5 + 0.5;
+ivec2 i=ivec2(floor(p));
+vec2 f=fract(p);
+vec2 u=f*f*(3.-2.*f);
+ivec2 oi=ivec2(0,1);
+vec2 of=vec2(oi);
+return mix(mix(dot(grad(i+oi.xx),f-of.xx),
+dot(grad(i+oi.yx),f-of.yx),u.x),
+mix(dot(grad(i+oi.xy),f-of.xy),
+dot(grad(i+oi.yy),f-of.yy),u.x),u.y)*.5+.5;
 }
-float fbm(vec2 p, int numOctaves, float scale, float lacunarity)
+float fbm(vec2 p, int no, float sc, float la)
 {
-float t = 0.0;
-float z = 1.0;
-for (int i = 0; i < numOctaves; ++i)
+float t=0.,z=1.;
+for(int i=0;i<no;++i)
 {
-z *= 0.5;
-t += z * noise(p * scale);
-p = p * lacunarity;
+z*=.5;
+t+=z*noise(p*sc);
+p*=la;
 }
-return t / (1.0 - z);
+return t/(1.-z);
 }
 `;
 
@@ -79,21 +70,15 @@ interface TextureCollection
 const VoronoiGrayscale = `
 vec2 voronoi(vec2 x, float w)
 {
-vec2 n = floor(x);
-vec2 f = fract(x);
-vec2 m = vec2(0.0, 8.0);
-for (int j = -2; j <= 2; ++j)
-for (int i = -2; i <= 2; ++i)
+vec2 n=floor(x),f=fract(x),m=vec2(0,8);
+for (int j=-2;j<3;++j)
+for (int i=-2;i<3;++i)
 {
-vec2 g = vec2(i, j);
-vec2 o = hash2(n + g);
-float d = length(g - f + o);
-float col = 0.5 + 0.5 * sin(hash1(dot(n + g, vec2(7.0, 113.0))) * 2.5 + 5.0);
-float h = smoothstep(0.0, 1.0, 0.5 + 0.5 * (m.y - d) / w);
-m.y = mix(m.y, d, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // distance
-m.x = mix(m.x, col, h) - h * (1.0 - h) * w / (1.0 + 3.0 * w); // color
+vec2 g=vec2(i,j),o=hash2(n+g);
+float d=length(g-f+o),col=.5+.5*sin(hash1(dot(n+g,vec2(7,113)))*2.5+5.),h=smoothstep(0.,1.,.5+.5*(m.y-d)/w);
+m.y=mix(m.y,d,h)-h*(1.-h)*w/(1.+3.*w);
+m.x=mix(m.x,col,h)-h*(1.-h)*w/(1.+3.*w);
 }
-
 return m;
 }
 `;
@@ -102,24 +87,24 @@ return m;
 const ShaderUtils = `
 float hash1(float n)
 {
-return fract(sin(n) * 43758.5453);
+return fract(sin(n)*43758.5453);
 }
 vec2 hash2(vec2 p)
 {
-p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+p = vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3)));
 return fract(sin(p)*43758.5453);
 }
 float saturate(float x)
 {
-return clamp(x, 0.0, 1.0);
+return clamp(x,0.,1.);
 }
 float unlerp(float a, float b, float x)
 {
-return (x - a) / (b - a);
+return (x-a)/(b-a);
 }
-float remap(float from0, float from1, float to0, float to1, float x)
+float remap(float f0, float f1, float t0, float t1, float x)
 {
-return mix(to0, to1, unlerp(from0, from1, x));
+return mix(t0,t1,unlerp(f0,f1,x));
 }
 float sharpstep(float edge0, float edge1, float x)
 {
@@ -399,21 +384,6 @@ abstract class VectorBase<Length extends number> extends Float32Array
         const len = this.length;
         return len > 1e-9 ? this.mulScalar(1 / len) : this.setScalar(0);
     }
-
-    public lerpVectors(a: VectorBase<Length>, b: VectorBase<Length>, t: number)
-    {
-        for (let i = 0; i < super.length; ++i)
-        {
-            this[i] = Lerp(a[i], b[i], t);
-        }
-
-        return this;
-    }
-
-    public lerp(other: VectorBase<Length>, t: number)
-    {
-        return this.lerpVectors(this, other, t);
-    }
 }
 
 class Vector3 extends VectorBase<3>
@@ -643,51 +613,6 @@ class Matrix4x4 extends Float32Array
         return this;
     }
 
-    public invert()
-    {
-        const
-            m11 = this[0], m21 = this[1], m31 = this[2], m41 = this[3],
-            m12 = this[4], m22 = this[5], m32 = this[6], m42 = this[7],
-            m13 = this[8], m23 = this[9], m33 = this[10], m43 = this[11],
-            m14 = this[12], m24 = this[13], m34 = this[14], m44 = this[15],
-
-            t1 = m23 * m34 * m42 - m24 * m33 * m42 + m24 * m32 * m43 - m22 * m34 * m43 - m23 * m32 * m44 + m22 * m33 * m44,
-            t2 = m14 * m33 * m42 - m13 * m34 * m42 - m14 * m32 * m43 + m12 * m34 * m43 + m13 * m32 * m44 - m12 * m33 * m44,
-            t3 = m13 * m24 * m42 - m14 * m23 * m42 + m14 * m22 * m43 - m12 * m24 * m43 - m13 * m22 * m44 + m12 * m23 * m44,
-            t4 = m14 * m23 * m32 - m13 * m24 * m32 - m14 * m22 * m33 + m12 * m24 * m33 + m13 * m22 * m34 - m12 * m23 * m34;
-
-        const det = m11 * t1 + m21 * t2 + m31 * t3 + m41 * t4;
-
-        if (det === 0)
-        {
-            return this.set([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        }
-
-        const detInv = 1 / det;
-
-        this[0] = detInv * t1;
-        this[1] = detInv * (m24 * m33 * m41 - m23 * m34 * m41 - m24 * m31 * m43 + m21 * m34 * m43 + m23 * m31 * m44 - m21 * m33 * m44);
-        this[2] = detInv * (m22 * m34 * m41 - m24 * m32 * m41 + m24 * m31 * m42 - m21 * m34 * m42 - m22 * m31 * m44 + m21 * m32 * m44);
-        this[3] = detInv * (m23 * m32 * m41 - m22 * m33 * m41 - m23 * m31 * m42 + m21 * m33 * m42 + m22 * m31 * m43 - m21 * m32 * m43);
-
-        this[4] = detInv * t2;
-        this[5] = detInv * (m13 * m34 * m41 - m14 * m33 * m41 + m14 * m31 * m43 - m11 * m34 * m43 - m13 * m31 * m44 + m11 * m33 * m44);
-        this[6] = detInv * (m14 * m32 * m41 - m12 * m34 * m41 - m14 * m31 * m42 + m11 * m34 * m42 + m12 * m31 * m44 - m11 * m32 * m44);
-        this[7] = detInv * (m12 * m33 * m41 - m13 * m32 * m41 + m13 * m31 * m42 - m11 * m33 * m42 - m12 * m31 * m43 + m11 * m32 * m43);
-
-        this[8] = detInv * t3;
-        this[9] = detInv * (m14 * m23 * m41 - m13 * m24 * m41 - m14 * m21 * m43 + m11 * m24 * m43 + m13 * m21 * m44 - m11 * m23 * m44);
-        this[10] = detInv * (m12 * m24 * m41 - m14 * m22 * m41 + m14 * m21 * m42 - m11 * m24 * m42 - m12 * m21 * m44 + m11 * m22 * m44);
-        this[11] = detInv * (m13 * m22 * m41 - m12 * m23 * m41 - m13 * m21 * m42 + m11 * m23 * m42 + m12 * m21 * m43 - m11 * m22 * m43);
-
-        this[12] = detInv * t4;
-        this[13] = detInv * (m13 * m24 * m31 - m14 * m23 * m31 + m14 * m21 * m33 - m11 * m24 * m33 - m13 * m21 * m34 + m11 * m23 * m34);
-        this[14] = detInv * (m14 * m22 * m31 - m12 * m24 * m31 - m14 * m21 * m32 + m11 * m24 * m32 + m12 * m21 * m34 - m11 * m22 * m34);
-        this[15] = detInv * (m12 * m23 * m31 - m13 * m22 * m31 + m13 * m21 * m32 - m11 * m23 * m32 - m12 * m21 * m33 + m11 * m22 * m33);
-
-        return this;
-    }
-
     public compose(position: Vector3, quaternion: Quaternion, scale: Vector3)
     {
         Matrix4x4Compose(position, quaternion, scale, this);
@@ -696,7 +621,6 @@ class Matrix4x4 extends Float32Array
 
     public makePerspective(left: number, right: number, top: number, bottom: number, near: number, far: number)
     {
-        const te = this;
         const x = 2 * near / (right - left);
         const y = 2 * near / (top - bottom);
 
@@ -705,17 +629,18 @@ class Matrix4x4 extends Float32Array
         const c = - (far + near) / (far - near);
         const d = - 2 * far * near / (far - near);
 
-        te[0] = x; te[4] = 0; te[8] = a; te[12] = 0;
-        te[1] = 0; te[5] = y; te[9] = b; te[13] = 0;
-        te[2] = 0; te[6] = 0; te[10] = c; te[14] = d;
-        te[3] = 0; te[7] = 0; te[11] = - 1; te[15] = 0;
+        this.set([
+            x, 0, 0, 0,
+            0, y, 0, 0,
+            a, b, c, -1,
+            0, 0, d, 0
+        ]);
 
         return this;
     }
 
     public makeOrthographic(left: number, right: number, top: number, bottom: number, near: number, far: number)
     {
-        const te = this;
         const w = 1.0 / (right - left);
         const h = 1.0 / (top - bottom);
         const p = 1.0 / (far - near);
@@ -724,10 +649,12 @@ class Matrix4x4 extends Float32Array
         const y = (top + bottom) * h;
         const z = (far + near) * p;
 
-        te[0] = 2 * w; te[4] = 0; te[8] = 0; te[12] = - x;
-        te[1] = 0; te[5] = 2 * h; te[9] = 0; te[13] = - y;
-        te[2] = 0; te[6] = 0; te[10] = - 2 * p; te[14] = - z;
-        te[3] = 0; te[7] = 0; te[11] = 0; te[15] = 1;
+        this.set([
+            2 * w, 0, 0, 0,
+            0, 2 * h, 0, 0,
+            0, 0, -2 * p, 0,
+            -x, -y, -z, 1
+        ]);
 
         return this;
     }
@@ -804,11 +731,10 @@ class Transform
 {
     public position = new Vector3();
     public rotation = new Quaternion();
-    public scale = new Vector3(1, 1, 1);
 
     public matrix()
     {
-        return new Matrix4x4().compose(this.position, this.rotation, this.scale);
+        return new Matrix4x4().compose(this.position, this.rotation, new Vector3(1, 1, 1));
     }
 
     public matrixInverse()
@@ -817,7 +743,7 @@ class Transform
         return new Matrix4x4().compose(
             this.position.clone().mulScalar(-1).applyQuaternion(invRotation),
             invRotation,
-            new Vector3(1, 1, 1).div(this.scale)
+            new Vector3(1, 1, 1)
         );
     }
 }
@@ -1309,127 +1235,6 @@ function CreateSphereGeometry(radius = 1, horizontalSubdivisions = 16, verticalS
     return { vertices: normalsF32.map(n => n * radius), triangles: new Uint32Array(triangles), normals: normalsF32 };
 }
 
-function CreateCapsuleGeometry(radius = 1, height = 1, horizontalSubdivisions = 16, verticalSubdivisions = 24)
-{
-    // the capsule is on the y axis
-    const vertices: number[] = [];
-    const normals: number[] = [];
-    const triangles: number[] = [];
-
-    // note: the geometry is not closed, and contains degenerate triangles at the poles
-    // but this allows the code to be smaller, and it doesn't affect the rendering anyways
-
-    // TODO: make sure this works properly
-
-    for (let i = 0; i <= horizontalSubdivisions / 2; ++i)
-    {
-        const angleY = -Math.PI / 2 + Math.PI * i / (horizontalSubdivisions - 1);
-        const yCoord = Math.sin(-angleY);
-        const yMultiplier = Math.cos(-angleY);
-
-        for (let j = 0; j < verticalSubdivisions; ++j)
-        {
-            const angleXZ = 2 * Math.PI * j / (verticalSubdivisions - 1);
-            const x = Math.cos(angleXZ) * yMultiplier;
-            const y = yCoord;
-            const z = Math.sin(angleXZ) * yMultiplier;
-            normals.push(x, y, z);
-            vertices.push(x * radius, y * radius + height / 2, z * radius);
-        }
-    }
-
-    for (let i = horizontalSubdivisions / 2; i < horizontalSubdivisions; ++i)
-    {
-        const angleY = -Math.PI / 2 + Math.PI * i / (horizontalSubdivisions - 1);
-        const yCoord = Math.sin(-angleY);
-        const yMultiplier = Math.cos(-angleY);
-
-        for (let j = 0; j < verticalSubdivisions; ++j)
-        {
-            const angleXZ = 2 * Math.PI * j / (verticalSubdivisions - 1);
-            const x = Math.cos(angleXZ) * yMultiplier;
-            const y = yCoord;
-            const z = Math.sin(angleXZ) * yMultiplier;
-            normals.push(x, y, z);
-            vertices.push(x * radius, y * radius - height / 2, z * radius);
-        }
-    }
-
-    // triangles
-    for (let i = 0; i < horizontalSubdivisions + 1; ++i)
-    {
-        const startIndex = i * verticalSubdivisions;
-        const nextRowStartIndex = startIndex + verticalSubdivisions;
-
-        for (let j = 0; j < verticalSubdivisions; ++j)
-        {
-            triangles.push(
-                startIndex + j,
-                startIndex + j + 1,
-                nextRowStartIndex + j + 1,
-
-                startIndex + j,
-                nextRowStartIndex + j + 1,
-                nextRowStartIndex + j
-            );
-        }
-    }
-
-    return { vertices: new Float32Array(vertices), triangles: new Uint32Array(triangles), normals: new Float32Array(normals) };
-}
-
-function CreatePlaneGeometry(width = 1, depth = 1)
-{
-    const halfWidth = width / 2;
-    const halfDepth = depth / 2;
-
-    const vertices = new Float32Array([
-        // bottom
-        halfWidth, 0, -halfDepth,
-        -halfWidth, 0, -halfDepth,
-        halfWidth, 0, halfDepth,
-        -halfWidth, 0, halfDepth,
-
-        // top
-        -halfWidth, 0, -halfDepth,
-        halfWidth, 0, -halfDepth,
-        -halfWidth, 0, halfDepth,
-        halfWidth, 0, halfDepth,
-    ]);
-
-    const triangles = new Uint32Array([
-        0,
-        0 + 3,
-        0 + 1,
-        0,
-        0 + 2,
-        0 + 3,
-
-        4,
-        4 + 3,
-        4 + 1,
-        4,
-        4 + 2,
-        4 + 3
-    ]);
-
-    const normals = new Float32Array([
-        // bottom
-        0, -1, 0,
-        0, -1, 0,
-        0, -1, 0,
-        0, -1, 0,
-
-        // top
-        0, 1, 0,
-        0, 1, 0,
-        0, 1, 0,
-        0, 1, 0
-    ]);
-
-    return { vertices, triangles, normals };
-}
-
 function CreateExtrudedGeometryConvex(polyline: number[], thickness: number)
 {
     // triangulated from the first point in the polygon, so it's only guaranteed to work for convex polygons
@@ -1546,13 +1351,14 @@ class Renderable extends SceneNode
 function CreateWebglCanvas(canvas: HTMLCanvasElement = document.createElement("canvas"))
 {
     const vertexShader = `#version 300 es
-in vec2 aVertexPosition;
+layout (location = 0)
+in vec2 vp;
 uniform float uAspect;
 out vec2 vPixelCoord;
 void main()
 {
-vPixelCoord = (aVertexPosition + vec2(1)) * 0.5;
-gl_Position = vec4(aVertexPosition, 0, 1);
+vPixelCoord = (vp+vec2(1))*.5;
+gl_Position=vec4(vp,0,1);
 }`;
 
     function CreateShader(shaderType: number, shaderSource: string)
@@ -1587,7 +1393,7 @@ in vec2 vPixelCoord;
 out vec4 outColor;
 
 uniform float uAspect;
-const vec2 pixelSize = vec2(${1 / width}, ${1 / height});
+const vec2 ps = vec2(${1 / width}, ${1 / height});
 
 ${inputTextures.map((_, idx) => `uniform sampler2D t${idx};`).join("\n")}
 
@@ -1607,7 +1413,7 @@ ${shaderMainImage}
         gl.useProgram(program);
 
         // setup attributes and uniforms
-        const vertexLocation = gl.getAttribLocation(program, "aVertexPosition");
+        const vertexLocation = 0;
         gl.uniform1f(gl.getUniformLocation(program, "uAspect"), width / height);
 
         // textures
@@ -1655,18 +1461,12 @@ ${shaderMainImage}
         //     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
         // }
 
-        const ext = gl.getExtension("EXT_texture_filter_anisotropic");
         ext && gl.texParameterf(gl.TEXTURE_2D, ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(16, gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
 
         return tex;
     }
 
-    function DeleteTexture(texture: WebGLTexture)
-    {
-        gl.deleteTexture(texture);
-    }
-
-    return { DrawWithShader, CreateTexture, DeleteTexture, canvas };
+    return { DrawWithShader, CreateTexture, canvas };
 }
 
 
@@ -2318,7 +2118,6 @@ function DrawImageToCanvas(w: number, h: number, drawFn: () => void)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
 
-    const ext = gl.getExtension("EXT_texture_filter_anisotropic");
     ext && gl.texParameterf(gl.TEXTURE_2D, ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(16, gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, drawCanvas);
     gl.generateMipmap(gl.TEXTURE_2D);
@@ -2631,63 +2430,6 @@ const arrowUpTexture = await ImageToWebglTexture(256, 256, arrowUpSvg);
 const playerStartingPosition = new Vector3();
 let playerStartingRotation = 0;
 const lightPositionForLevel = new Vector3();
-
-function Level0()
-{
-    playerStartingPosition.setValues(0, 1, 0);
-    playerStartingRotation = 0;
-
-    // ground
-    CreateSimpleCollidableBox(
-        20, 1, 20,
-        0, -0.6, 0,
-        0, 0, 0, 0,
-        solidMaterial
-    );
-
-    CreateSimpleCollidableSphere(2, 4, 0.5, 4, stoneMaterial);
-
-    // horizontal moving box
-    const box1 = CreateSimpleCollidableBox(
-        2, 1, 2,
-        3, 1, 0,
-        0, 0, 0, 0,
-        { ...solidMaterial, r: 0, g: 0, b: 1 }
-    );
-    box1.onUpdate.push(() => box1.object.transform.position.x = Math.sin(physicsTime * 2) * 2 + 1);
-
-    // vertical moving box
-    const box2 = CreateSimpleCollidableBox(
-        2, 1, 2,
-        2, 0, 1,
-        0, 0, 0, 0,
-        { ...solidMaterial, r: 0, g: 1, b: 1 }
-    );
-    box2.onUpdate.push(() => box2.object.transform.position.y = Math.sin(physicsTime * 2) * 3 + 1);
-
-    // spinning box
-    const box3 = CreateSimpleCollidableBox(
-        10, 10, 1,
-        10, 4, 1,
-        0, 0, 0, 0,
-        { ...solidMaterial, r: 1, g: 0, b: 1 }
-    );
-    box3.onUpdate.push(() => box3.object.transform.rotation.setFromAxisAngle(1, 0, 0, physicsTime * 4 + Math.sin(physicsTime) * 4 + Math.PI / 2));
-
-    CreateTrampolineLevelObject(2, 1, 2, -2, 0, -2, { ...solidMaterial, r: 1, g: 1, b: 1 });
-
-    CreateSawBladeLevelObject(3,
-        0, 2, -2,
-        0
-    );
-
-    CreatePowerup(-5, 1, -5, lightningTexture, SpeedBoost);
-    CreatePowerup(-5, 1, -3, arrowUpTexture, HighJump);
-
-    CreateSpikesLevelObject(10, 10, -5, 0.9, 5);
-
-    CreateFinishObject(0, -0.1, -8, 0);
-}
 
 function Elevator(object: LevelObject, min: number, max: number, speed: number, timeOffset = 0, axis = 1)
 {
@@ -3997,7 +3739,6 @@ requestAnimationFrame(Render);
 
 const enum RestartReason
 {
-    ManualRestart,
     LevelChange,
     SawBlade,
     Spikes,
@@ -4025,21 +3766,12 @@ async function Restart(reason: RestartReason)
             overlay.classList.add("dead");
         }
 
-        switch (reason)
-        {
-            case RestartReason.Lava:
-                deathText.textContent = "You burned in lava";
-                break;
-            case RestartReason.SawBlade:
-                deathText.textContent = "You were sliced by saw blades";
-                break;
-            case RestartReason.Spikes:
-                deathText.textContent = "You were impaled by spikes";
-                break;
-            case RestartReason.LevelChange:
-                deathText.textContent = "You survive... for now";
-                break;
-        }
+        deathText.textContent = [
+            "You survive... for now",
+            "You were sliced by saw blades",
+            "You were impaled by spikes",
+            "You burned in lava"
+        ][reason];
 
         deathText.classList.add("visible");
 
